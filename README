@@ -1,0 +1,5 @@
+Motor Controller software for RN#1 robot.
+
+BLDC / brushed DC motor controller.
+
+Based on STM32F0??? Cortex M0 MCU.
