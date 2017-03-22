@@ -1,9 +1,9 @@
 MEMORY
 {
-  ram (rwx)        : ORIGIN = 0x20000000, LENGTH = 12K
-  stack(rwx)       : ORIGIN = 0x20002FF8, LENGTH = 0K
+  ram (rwx)        : ORIGIN = 0x20000000, LENGTH = 8K
+  stack(rwx)       : ORIGIN = 0x20001FF8, LENGTH = 0K
 
-  rom (rx)         : ORIGIN = 0x00000000, LENGTH = 62K
+  rom (rx)         : ORIGIN = 0x00000000, LENGTH = 32K
 }
 
 SECTIONS

@@ -41,7 +41,7 @@ syms:
 asm: $(ASMS)
 
 e: 
-	nano main.c stm32init.c
+	nano main.c stm32init.c stm32.ld
 
 s:
 	sudo screen /dev/ttyUSB0 115200
