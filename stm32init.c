@@ -7,12 +7,12 @@ void hardfault_handler();
 
 extern void error(int code);
 extern void main();
-extern void uart_rx_handler();
 extern void adc_int_handler();
+extern void spi_inthandler();
 
 extern unsigned int _STACKTOP;
 
-// Vector table on page 189 on the Reference Manual RM0364
+// Vector table on page 209 on the Reference Manual RM0091
 unsigned int * the_nvic_vector[48] __attribute__ ((section(".nvic_vector"))) =
 {
 /* 0x0000                    */ (unsigned int *) &_STACKTOP,
@@ -49,14 +49,14 @@ unsigned int * the_nvic_vector[48] __attribute__ ((section(".nvic_vector"))) =
 /* 0x007C                    */ (unsigned int *) invalid_handler,
 /* 0x0080                    */ (unsigned int *) invalid_handler,
 /* 0x0084                    */ (unsigned int *) invalid_handler,
-/* 0x0088                    */ (unsigned int *) adc_int_handler,
+/* 0x0088                    */ (unsigned int *) invalid_handler,
 /* 0x008C                    */ (unsigned int *) invalid_handler,
 /* 0x0090                    */ (unsigned int *) invalid_handler,
 /* 0x0094                    */ (unsigned int *) invalid_handler,
 /* 0x0098                    */ (unsigned int *) invalid_handler,
 /* 0x009C                    */ (unsigned int *) invalid_handler,
 /* 0x00A0                    */ (unsigned int *) invalid_handler,
-/* 0x00A4                    */ (unsigned int *) invalid_handler,
+/* 0x00A4  SPI1              */ (unsigned int *) spi_inthandler,
 /* 0x00A8                    */ (unsigned int *) invalid_handler,
 /* 0x00AC                    */ (unsigned int *) invalid_handler,
 /* 0x00B0                    */ (unsigned int *) invalid_handler,

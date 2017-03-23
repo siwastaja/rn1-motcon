@@ -1,0 +1,28 @@
+RN#1
+BRAIN CPU <-> MOTCON CPU SPI COMMUNICATION PROTOCOL SPECIFICATION
+
+
+16-bit data width
+7.5MHz
+
+6 bits cmd  10 bit data
+
+Commands:
+
+1 NOP, REPORT1
+2 NOP, REPORT2
+3 NOP, REPORT3
+11 SPEED_FORWARD  0 = stop, 1023 = max speed
+12 SPEED_BACKWARD 0 = stop, 1023 = max speed
+13 CURR_LIMIT     0 = stop, 1023 = max current limit
+
+
+When not otherwise specified, commands reply with REPORT1 data.
+
+
+Reports:
+
+6 bits header 10 bit data
+
+1  REPORT1   data=latest current
+

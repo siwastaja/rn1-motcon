@@ -12,6 +12,8 @@
 #define EN_GATE()  {GPIOA->BSRR = 1UL<<11;}
 #define DIS_GATE() {GPIOA->BSRR = 1UL<<(11+16);}
 
+int bldc = 0;
+
 void delay_us(uint32_t i)
 {
 	if(i==0) return;
@@ -48,32 +50,12 @@ void error(int code)
 	}
 }
 
-void uart_rx_handler()
-{
-	//char byte = USART1->RDR;
-
-	if(USART1->ISR & USART_ISR_ORE)
-	{
-		USART1->ICR |= USART_ICR_ORECF;
-	}
-}
-
 void adc_int_handler()
 {
 	LED_ON();
 	delay_ms(50);
 	LED_OFF();
 	ADC1->ISR |= 1UL<<7;
-}
-
-void usart_print(const char *buf)
-{
-	while(buf[0] != 0)
-	{
-		while((USART1->ISR & (1UL<<7)) == 0) ;
-		USART1->TDR = buf[0];
-		buf++;
-	}
 }
 
 #define MAX_PROT_LIM 40000 // mA
@@ -95,6 +77,42 @@ void set_prot_lim(int ma)
 }
 
 
+void forward(uint16_t speed)
+{
+	if(speed > 400)
+		speed = 400;
+	TIM1->CCR1 = 0;
+	TIM1->CCR2 = speed;
+}
+
+void backward(uint16_t speed)
+{
+	if(speed > 400)
+		speed = 400;
+	TIM1->CCR1 = speed;
+	TIM1->CCR2 = 0;
+}
+
+
+int kak = 0;
+void spi_inthandler()
+{
+	uint16_t msg = SPI1->DR;
+	uint16_t cmd = (msg&(0b111111<<10)) >> 10;
+	uint16_t param = msg&0x3FF;
+	switch(cmd)
+	{
+		case 11:
+			forward(param);
+		break;
+		case 12:
+			backward(param);
+		break;
+		default:
+		break;
+	}
+	kak++;
+}
 
 int main()
 {
@@ -120,13 +138,13 @@ int main()
 	             // 00 = low, 01 = medium, 11 = high
 	             //    15141312111009080706050403020100
 	             //     | | | | | | | | | | | | | | | |
-	GPIOA->MODER   = 0b00000001011010101011111111111111;
+	GPIOA->MODER   = 0b10000001011010101011111111111111;
 	GPIOA->OSPEEDR = 0b00000000000101010100000000000000;
 	GPIOA->PUPDR   = 0b00010100000000000000000000000000;
 	             //    15141312111009080706050403020100
 	             //     | | | | | | | | | | | | | | | |
 	GPIOB->MODER   = 0b00000000000000000000101010001010;
-	GPIOB->OSPEEDR = 0b00000000000000000000000000000101;
+	GPIOB->OSPEEDR = 0b00000000000000000000000100000101;
 	             //    15141312111009080706050403020100
 	             //     | | | | | | | | | | | | | | | |
 	GPIOF->MODER   = 0b00000000000000000000000000000001;
@@ -138,14 +156,9 @@ int main()
 	GPIOA->AFR[0] = 2UL<<28 /*PA7 = TIM1*/;
 	GPIOA->AFR[1] = 2UL<<0 /*PA8 = TIM1*/ | 2UL<<4 /*PA9 = TIM1*/ | 2UL<<8 /*PA10 = TIM1*/;
 	GPIOB->AFR[0] = 2UL<<0 /*PB0 = TIM1*/ | 2UL<<4 /*PB1 = TIM1*/;
+	// SPI1 is at AF0, so defaults OK.
 
-	// ARR = freq
-	// CCR = duty
-	// 110 (mode 1) or 111 (mode 2) OCxM bits in CCMRx
-	// OCxPE must be enabled
-	//ARPE in CR1
-	// just before starting: set UG in EGR
-	// mode = 1, maybe
+
 
 	TIM1->CR1 = 0b01<<5 /*centermode 1*/;
 	// TIM1->CR2 defaults ok
@@ -154,13 +167,16 @@ int main()
 	              1UL<<11 /*OC2 Preload Enable*/| 0b110UL<<12 /*OC1 PWMmode 1*/;
 	TIM1->CCMR2 = 1UL<<3 /*OC3 Preload enable*/ | 0b110UL<<4 /*OC4 PWMmode 1*/;
 	TIM1->CCER =  1UL<<0 /*OC1 on*/ | 1UL<<2 /*OC1 complementary output enable*/ |
-	              1UL<<4 /*OC2 on*/ | 1UL<<6 /*OC2 complementary output enable*/ |
-	              1UL<<8 /*OC3 on*/ | 1UL<<10 /*OC3 complementary output enable*/;
+	              1UL<<4 /*OC2 on*/ | 1UL<<6 /*OC2 complementary output enable*/;
 
 	TIM1->ARR = 1024; // 23.4 kHz
-	TIM1->CCR1 = 100;
-	TIM1->CCR2 = 200;
-	TIM1->CCR3 = 300;
+
+	if(bldc)
+		TIM1->CCER |= 1UL<<8 /*OC3 on*/ | 1UL<<10 /*OC3 complementary output enable*/;
+
+	TIM1->CCR1 = 0;
+	TIM1->CCR2 = 100;
+//	TIM1->CCR3 = 300;
 	TIM1->BDTR = 1UL<<15 /*Main output enable*/ | 1UL /*21ns deadtime*/;
 	TIM1->EGR |= 1; // Generate Reinit+update
 	TIM1->CR1 |= 1; // Enable
@@ -168,18 +184,21 @@ int main()
 	set_prot_lim(2000);
 	DAC->CR |= 1; // enable, defaults good otherwise.
 
+	SPI1->CR2 = 0b1111UL<<8 /*16-bit*/ | 1UL<<6 /*RX buffer not empty interrupt*/;
+	SPI1->CR1 = 1UL<<6; // Enable SPI - zeroes good otherwise.
 
-//	NVIC_EnableIRQ(USART1_IRQn);
-//	__enable_irq();
+	NVIC_EnableIRQ(SPI1_IRQn);
+	__enable_irq();
 
 	EN_GATE();
-
+	// todo: pullup in NSS (PA15)
 	while(1)
 	{
 		LED_ON();
-		delay_ms(500);
+		delay_ms(100);
 		LED_OFF();
-		delay_ms(500);
+		delay_ms(100);
+
 
 /*		char buffer[200];
 		char* buf = buffer;

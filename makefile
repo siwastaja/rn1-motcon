@@ -41,7 +41,7 @@ syms:
 asm: $(ASMS)
 
 e: 
-	nano main.c stm32init.c stm32.ld
+	nano main.c stm32init.c stm32.ld motcon_comm.txt
 
 s:
 	sudo screen /dev/ttyUSB0 115200
