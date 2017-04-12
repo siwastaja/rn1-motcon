@@ -9,6 +9,7 @@ extern void error(int code);
 extern void main();
 extern void adc_int_handler();
 extern void spi_inthandler();
+extern void tim1_inthandler();
 
 extern unsigned int _STACKTOP;
 
@@ -44,7 +45,7 @@ unsigned int * the_nvic_vector[48] __attribute__ ((section(".nvic_vector"))) =
 /* 0x0068                    */ (unsigned int *) invalid_handler,
 /* 0x006C                    */ (unsigned int *) invalid_handler,
 /* 0x0070                    */ (unsigned int *) invalid_handler,
-/* 0x0074                    */ (unsigned int *) invalid_handler,
+/* 0x0074 TIM1_BRK_UP_TRG_COM*/ (unsigned int *) tim1_inthandler,
 /* 0x0078                    */ (unsigned int *) invalid_handler,
 /* 0x007C                    */ (unsigned int *) invalid_handler,
 /* 0x0080                    */ (unsigned int *) invalid_handler,

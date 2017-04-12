@@ -196,6 +196,79 @@ void run_dccal()
 	delay_ms(10);
 }
 
+/*
+	Sine table is 256 long. It is pointed to by the MSByte of uint32_t which rolls over, for
+	good resolution of the fundamental frequency.
+*/
+
+volatile uint32_t sine_loc = 0;
+
+#define PWM_MID 512
+
+volatile uint32_t freq = 4*65536;
+volatile uint32_t hall_aim = 20000*65536;
+
+#define MIN_FREQ 1*65536
+#define MAX_FREQ 100*65536
+
+volatile uint8_t sin_mult = 64;
+
+volatile int d_shift = 12;
+volatile int pi_shift = 31;
+
+void tim1_inthandler()
+{
+	static int prev_halls[3];
+	static int prev_err;
+
+	TIM1->SR = 0; // Clear interrupt flags
+	LED_ON();
+	uint32_t loc = sine_loc;
+
+	int idxa = ((sine_loc)&0xff000000)>>24;
+	int idxb = ((sine_loc+1431655765UL)&0xff000000)>>24;
+	int idxc = ((sine_loc+2863311531UL)&0xff000000)>>24;
+
+	uint8_t mult = sin_mult;
+	TIM1->CCR1 = (PWM_MID) + ((mult*sine[idxa])>>14);
+	TIM1->CCR2 = (PWM_MID) + ((mult*sine[idxb])>>14);
+	TIM1->CCR3 = (PWM_MID) + ((mult*sine[idxc])>>14);
+
+	int halls[3];
+	halls[0] = 1; //HALL_A();
+	halls[1] = HALL_B();
+	halls[2] = 1; //HALL_C();
+
+	int err = 0;
+	int derr = 0;
+	if(!halls[1] && prev_halls[1])
+	{
+//		dbg = (loc&0xffff0000)>>16;
+		err = (int)hall_aim - (int)loc;
+		derr = (err - prev_err)>>d_shift; // D term
+//		dbg = derr;
+//		dbg = err>>16;
+	}
+
+	int f = freq;
+	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term (30)*/ + derr;
+	prev_err = err;
+
+	if(derr > (MAX_FREQ)) derr = (MAX_FREQ);
+	if(derr < -(MAX_FREQ)) derr = -(MAX_FREQ);
+
+	if(f<(MIN_FREQ)) f = (MIN_FREQ);
+	else if(f>(MAX_FREQ)) f = (MAX_FREQ);
+
+	prev_halls[0] = halls[0];
+	prev_halls[1] = halls[1];
+	prev_halls[2] = halls[2];
+
+	sine_loc = loc+f;
+	freq = f;
+	LED_OFF();
+}
+
 int main()
 {
 	int i;
@@ -261,7 +334,8 @@ int main()
 	TIM1->CCR3 = 512;
 	TIM1->BDTR = 1UL<<15 /*Main output enable*/ | 1UL /*21ns deadtime*/;
 	TIM1->EGR |= 1; // Generate Reinit+update
-	TIM1->CR1 |= 1; // Enable
+	TIM1->DIER = 1UL /*Update interrupt enable*/;
+	TIM1->CR1 |= 1; // Enable the timer
 
 	set_prot_lim(2000);
 	DAC->CR |= 1; // enable, defaults good otherwise.
@@ -292,6 +366,7 @@ int main()
 	ADC1->CR |= 1UL<<2; // start
 
 	NVIC_EnableIRQ(SPI1_IRQn);
+	NVIC_EnableIRQ(TIM1_BRK_UP_TRG_COM_IRQn);
 	__enable_irq();
 //	EN_GATE();
 
@@ -302,13 +377,8 @@ int main()
 
 	// todo: pullup in NSS (PA15)
 
+	int new_mult=50;
 
-	
-	int sine_cnt = 0;
-	int prev_hall = 0;
-	int hall_setpoint = 80;
-	int delay=1500;
-	int power=1;
 	while(1)
 	{
 /*		LED_ON();
@@ -317,114 +387,63 @@ int main()
 		delay_ms(50);
 */
 
-		sine_cnt++;
-		if(sine_cnt > 255)
-			sine_cnt = 0;
-
-		int a = sine_cnt;
-		int b = sine_cnt+85;
-		int c = sine_cnt+171;
-
-		if(b>255) b-= 256;
-		if(c>255) c-= 256;
-
-		if(power == 1)
-		{		
-			TIM1->CCR1 = 512 + (sine[a]>>9);
-			TIM1->CCR2 = 512 + (sine[b]>>9);
-			TIM1->CCR3 = 512 + (sine[c]>>9);
-		}
-		else if(power == 2)
-		{
-			TIM1->CCR1 = 512 + (sine[a]>>8);
-			TIM1->CCR2 = 512 + (sine[b]>>8);
-			TIM1->CCR3 = 512 + (sine[c]>>8);
-		}
-		else if(power == 3)
-		{
-			TIM1->CCR1 = 512 + (sine[a]>>7);
-			TIM1->CCR2 = 512 + (sine[b]>>7);
-			TIM1->CCR3 = 512 + (sine[c]>>7);
-		}
-		else
-		{		
-			TIM1->CCR1 = 512 + (sine[a]>>10);
-			TIM1->CCR2 = 512 + (sine[b]>>10);
-			TIM1->CCR3 = 512 + (sine[c]>>10);
-		}
-
-
-		int hall_error = 0;
-		int hall = HALL_B();
-		if(!hall && prev_hall) // got the pulse
-		{
-			int hall_location = sine_cnt;
-			hall_error = hall_location-hall_setpoint;
-		}
-		prev_hall = hall;
-
-		if(delay < 200)
-			delay += hall_error*1;
-		else if(delay < 300)
-			delay += hall_error*2;
-		else if(delay < 400)
-			delay += hall_error*3;
-		else if(delay < 450)
-			delay += hall_error*4;
-		else if(delay < 500)
-			delay += hall_error*5;
-		else if(delay < 600)
-			delay += hall_error*6;
-		else if(delay < 800)
-			delay += hall_error*10;
-		else if(delay < 1200)
-			delay += hall_error*15;
-		else if(delay < 1900)
-			delay += hall_error*25;
-		else if(delay < 2500)
-			delay += hall_error*40;
-		else
-			delay += hall_error*60;
-
-		if(delay < 150) delay=150;
-		if(delay > 4000) delay=4000;
-
-		dbg = delay;
-
-		delay_us(delay);
+		delay_ms(5);
 
 		if(dbg_in == 'a')
 		{
-			LED_ON();
+//			LED_ON();
 			EN_GATE();
 		}
 
 		if(dbg_in == 's')
 		{
-			delay=1500;
-			power=1;
-			LED_OFF();
+//			LED_OFF();
 			DIS_GATE();
 		}
 
-		if(dbg_in == '1') hall_setpoint = 85-16;
-		if(dbg_in == '2') hall_setpoint = 85-8;
-		if(dbg_in == '3') hall_setpoint = 85;
-		if(dbg_in == '4') hall_setpoint = 85+8;
-		if(dbg_in == '5') hall_setpoint = 85+16;
-		if(dbg_in == '7') {if(power==3) delay*=8; else if(power==2) delay*=4; else if(power==1) delay*=2;  power = 0;}
-		if(dbg_in == '8') {if(power==3) delay*=4; else if(power==2) delay*=2; else if(power==0) delay/=2;  power = 1;}
-		if(dbg_in == '9') {if(power==3) delay*=2; else if(power==0) delay/=4; else if(power==1) delay/=2;  power = 2;}
-		if(dbg_in == '0') {if(power==0) delay/=8; else if(power==1) delay/=4; else if(power==2) delay/=2;  power = 3;}
+		if(dbg_in == 'q') new_mult=10;
+		if(dbg_in == 'w') new_mult=14;
+		if(dbg_in == 'e') new_mult=20;
+		if(dbg_in == 'r') new_mult=28;
+		if(dbg_in == 't') new_mult=40;
+		if(dbg_in == 'y') new_mult=56;
+		if(dbg_in == 'u') new_mult=80;
+		if(dbg_in == 'i') new_mult=110;
+		if(dbg_in == 'o') new_mult=160;
+		if(dbg_in == 'p') new_mult=220;
+
+		int mult = sin_mult;
+		if(mult < new_mult) mult++;
+		else if(mult > new_mult) mult--;
+		sin_mult = mult;
+
+		if(dbg_in == '1') hall_aim=21000*65536;
+		if(dbg_in == '2') hall_aim=21500*65536;
+		if(dbg_in == '3') hall_aim=22000*65536;
+		if(dbg_in == '4') hall_aim=22500*65536;
+		if(dbg_in == '5') hall_aim=23000*65536;
+		if(dbg_in == '6') hall_aim=23500*65536;
+		if(dbg_in == '7') hall_aim=24000*65536;
+		if(dbg_in == '8') hall_aim=24500*65536;
+		if(dbg_in == '9') hall_aim=25000*65536;
+
+		if(dbg_in == 'z') d_shift=24;
+		if(dbg_in == 'x') d_shift=14;
+		if(dbg_in == 'c') d_shift=13;
+		if(dbg_in == 'v') d_shift=12;
+		if(dbg_in == 'b') d_shift=11;
+		if(dbg_in == 'n') d_shift=10;
+		if(dbg_in == 'm') d_shift=9;
+
+		if(dbg_in == 'g') pi_shift=33;
+		if(dbg_in == 'h') pi_shift=32;
+		if(dbg_in == 'j') pi_shift=31;
+		if(dbg_in == 'k') pi_shift=30;
+		if(dbg_in == 'l') pi_shift=29;
 
 
-	
-/*		int val = 0;
-		if(HALL_A()) val |= 1;
-		if(HALL_B()) val |= 2;
-		if(HALL_C()) val |= 4;
-		dbg = val;
-*/
+		dbg = (freq&0xffff0000)>>16;
+
 
 //		if(ADC1->ISR & 2)
 //			LED_ON();
