@@ -215,6 +215,7 @@ volatile uint8_t sin_mult = 64;
 
 volatile int d_shift = 12;
 volatile int pi_shift = 31;
+int hall_aim_f_comp = 30;
 
 void tim1_inthandler()
 {
@@ -241,17 +242,18 @@ void tim1_inthandler()
 
 	int err = 0;
 	int derr = 0;
+	int f = freq;
 	if(!halls[1] && prev_halls[1])
 	{
 //		dbg = (loc&0xffff0000)>>16;
-		err = (int)hall_aim - (int)loc;
+		err = ((int)hall_aim + hall_aim_f_comp*f) - (int)loc;
 		derr = (err - prev_err)>>d_shift; // D term
+		dbg = ((int)hall_aim + hall_aim_f_comp*f)>>16;
 //		dbg = derr;
 //		dbg = err>>16;
 	}
 
-	int f = freq;
-	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term (30)*/ + derr;
+	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term */ + derr;
 	prev_err = err;
 
 	if(derr > (MAX_FREQ)) derr = (MAX_FREQ);
@@ -442,7 +444,7 @@ int main()
 		if(dbg_in == 'l') pi_shift=29;
 
 
-		dbg = (freq&0xffff0000)>>16;
+//		dbg = (freq&0xffff0000)>>16;
 
 
 //		if(ADC1->ISR & 2)
