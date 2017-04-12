@@ -21,6 +21,26 @@
 
 int bldc = 1;
 
+const int sine[256] =
+{
+0,804,1607,2410,3211,4011,4807,5601,6392,7179,7961,8739,9511,10278,11038,11792,
+12539,13278,14009,14732,15446,16150,16845,17530,18204,18867,19519,20159,20787,21402,22004,22594,
+23169,23731,24278,24811,25329,25831,26318,26789,27244,27683,28105,28510,28897,29268,29621,29955,
+30272,30571,30851,31113,31356,31580,31785,31970,32137,32284,32412,32520,32609,32678,32727,32757,
+32767,32757,32727,32678,32609,32520,32412,32284,32137,31970,31785,31580,31356,31113,30851,30571,
+30272,29955,29621,29268,28897,28510,28105,27683,27244,26789,26318,25831,25329,24811,24278,23731,
+23169,22594,22004,21402,20787,20159,19519,18867,18204,17530,16845,16150,15446,14732,14009,13278,
+12539,11792,11038,10278,9511,8739,7961,7179,6392,5601,4807,4011,3211,2410,1607,804,
+0,-804,-1607,-2410,-3211,-4011,-4807,-5601,-6392,-7179,-7961,-8739,-9511,-10278,-11038,-11792,
+-12539,-13278,-14009,-14732,-15446,-16150,-16845,-17530,-18204,-18867,-19519,-20159,-20787,-21402,-22004,-22594,
+-23169,-23731,-24278,-24811,-25329,-25831,-26318,-26789,-27244,-27683,-28105,-28510,-28897,-29268,-29621,-29955,
+-30272,-30571,-30851,-31113,-31356,-31580,-31785,-31970,-32137,-32284,-32412,-32520,-32609,-32678,-32727,-32757,
+-32767,-32757,-32727,-32678,-32609,-32520,-32412,-32284,-32137,-31970,-31785,-31580,-31356,-31113,-30851,-30571,
+-30272,-29955,-29621,-29268,-28897,-28510,-28105,-27683,-27244,-26789,-26318,-25831,-25329,-24811,-24278,-23731,
+-23169,-22594,-22004,-21402,-20787,-20159,-19519,-18867,-18204,-17530,-16845,-16150,-15446,-14732,-14009,-13278,
+-12539,-11792,-11038,-10278,-9511,-8739,-7961,-7179,-6392,-5601,-4807,-4011,-3211,-2410,-1607,-804
+};
+
 void delay_us(uint32_t i)
 {
 	if(i==0) return;
@@ -282,11 +302,12 @@ int main()
 
 	// todo: pullup in NSS (PA15)
 
-	int sine[32] = {0,12,25,37,50,62,75,87,100,87,75,62,50,37,25,12,0,-12,-25,-37,-50,-62,-75,-87,-100,-87,-75,-62,-50,-37,-25,-12};
+
+	
 	int sine_cnt = 0;
 	int prev_hall = 0;
-	int hall_setpoint = 10;
-	int delay=10000;
+	int hall_setpoint = 80;
+	int delay=1500;
 	int power=1;
 	while(1)
 	{
@@ -297,33 +318,39 @@ int main()
 */
 
 		sine_cnt++;
-		if(sine_cnt > 31)
+		if(sine_cnt > 255)
 			sine_cnt = 0;
 
 		int a = sine_cnt;
-		int b = sine_cnt+11;
-		int c = sine_cnt+21;
+		int b = sine_cnt+85;
+		int c = sine_cnt+171;
 
-		if(b>31) b-= 32;
-		if(c>31) c-= 32;
+		if(b>255) b-= 256;
+		if(c>255) c-= 256;
 
 		if(power == 1)
 		{		
-			TIM1->CCR1 = 512 + (sine[a]>>1);
-			TIM1->CCR2 = 512 + (sine[b]>>1);
-			TIM1->CCR3 = 512 + (sine[c]>>1);
+			TIM1->CCR1 = 512 + (sine[a]>>9);
+			TIM1->CCR2 = 512 + (sine[b]>>9);
+			TIM1->CCR3 = 512 + (sine[c]>>9);
 		}
 		else if(power == 2)
 		{
-			TIM1->CCR1 = 512 + (sine[a]>>0);
-			TIM1->CCR2 = 512 + (sine[b]>>0);
-			TIM1->CCR3 = 512 + (sine[c]>>0);
+			TIM1->CCR1 = 512 + (sine[a]>>8);
+			TIM1->CCR2 = 512 + (sine[b]>>8);
+			TIM1->CCR3 = 512 + (sine[c]>>8);
+		}
+		else if(power == 3)
+		{
+			TIM1->CCR1 = 512 + (sine[a]>>7);
+			TIM1->CCR2 = 512 + (sine[b]>>7);
+			TIM1->CCR3 = 512 + (sine[c]>>7);
 		}
 		else
 		{		
-			TIM1->CCR1 = 512 + (sine[a]>>2);
-			TIM1->CCR2 = 512 + (sine[b]>>2);
-			TIM1->CCR3 = 512 + (sine[c]>>2);
+			TIM1->CCR1 = 512 + (sine[a]>>10);
+			TIM1->CCR2 = 512 + (sine[b]>>10);
+			TIM1->CCR3 = 512 + (sine[c]>>10);
 		}
 
 
@@ -336,17 +363,31 @@ int main()
 		}
 		prev_hall = hall;
 
-		if(delay < 5000)
-			delay += hall_error*300;
-		else if(delay < 10000)
-			delay += hall_error*400;
-		else if(delay < 15000)
-			delay += hall_error*800;
+		if(delay < 200)
+			delay += hall_error*1;
+		else if(delay < 300)
+			delay += hall_error*2;
+		else if(delay < 400)
+			delay += hall_error*3;
+		else if(delay < 450)
+			delay += hall_error*4;
+		else if(delay < 500)
+			delay += hall_error*5;
+		else if(delay < 600)
+			delay += hall_error*6;
+		else if(delay < 800)
+			delay += hall_error*10;
+		else if(delay < 1200)
+			delay += hall_error*15;
+		else if(delay < 1900)
+			delay += hall_error*25;
+		else if(delay < 2500)
+			delay += hall_error*40;
 		else
-			delay += hall_error*1200;
+			delay += hall_error*60;
 
-		if(delay < 3000) delay=3000;
-		if(delay > 20000) delay=20000;
+		if(delay < 150) delay=150;
+		if(delay > 4000) delay=4000;
 
 		dbg = delay;
 
@@ -360,18 +401,21 @@ int main()
 
 		if(dbg_in == 's')
 		{
+			delay=1500;
+			power=1;
 			LED_OFF();
 			DIS_GATE();
 		}
 
-		if(dbg_in == '1') hall_setpoint = 8;
-		if(dbg_in == '2') hall_setpoint = 9;
-		if(dbg_in == '3') hall_setpoint = 10;
-		if(dbg_in == '4') hall_setpoint = 11;
-		if(dbg_in == '5') hall_setpoint = 12;
-		if(dbg_in == '7') power = 0;
-		if(dbg_in == '8') power = 1;
-		if(dbg_in == '9') power = 2;
+		if(dbg_in == '1') hall_setpoint = 85-16;
+		if(dbg_in == '2') hall_setpoint = 85-8;
+		if(dbg_in == '3') hall_setpoint = 85;
+		if(dbg_in == '4') hall_setpoint = 85+8;
+		if(dbg_in == '5') hall_setpoint = 85+16;
+		if(dbg_in == '7') {if(power==3) delay*=8; else if(power==2) delay*=4; else if(power==1) delay*=2;  power = 0;}
+		if(dbg_in == '8') {if(power==3) delay*=4; else if(power==2) delay*=2; else if(power==0) delay/=2;  power = 1;}
+		if(dbg_in == '9') {if(power==3) delay*=2; else if(power==0) delay/=4; else if(power==1) delay/=2;  power = 2;}
+		if(dbg_in == '0') {if(power==0) delay/=8; else if(power==1) delay/=4; else if(power==2) delay/=2;  power = 3;}
 
 
 	
