@@ -19,6 +19,8 @@
 #define HALL_B() (GPIOB->IDR & (1UL<<7))
 #define HALL_A() (GPIOB->IDR & (1UL<<6))
 
+#define OVERCURR() (!(GPIOA->IDR & (1UL<<14)))
+
 int bldc = 1;
 
 const int sine[256] =
@@ -208,19 +210,16 @@ volatile uint32_t sine_loc = 0;
 #define MAX_FREQ 100*65536
 
 volatile uint32_t freq = MIN_FREQ*10;
-volatile uint32_t hall_aim = 0; // 25000*65536;
+volatile uint32_t hall_aim = 4000*65536;
 
 
 volatile uint8_t sin_mult = 64;
 
 volatile int d_shift = 13;
 volatile int pi_shift = 32;
-int hall_aim_f_comp = 30;
+int hall_aim_f_comp = 0;
 
-
-// aim: HALLA 42000*65536
-// aim: HALLB 0*65536
-// aim: HALLC 25000*65536?
+volatile int reverse = 0;
 
 #define PHSHIFT_1 (1431655765UL)
 #define PHSHIFT_2 (2863311531UL)
@@ -230,16 +229,16 @@ void tim1_inthandler()
 	static int prev_halls[3];
 	static int ignore_halls[3] = {0,0,0};
 	static int prev_err;
+	static int currlim_mult = 255;
 
 	TIM1->SR = 0; // Clear interrupt flags
-	LED_ON();
 	uint32_t loc = sine_loc;
 
 	int idxa = ((sine_loc)&0xff000000)>>24;
 	int idxb = ((sine_loc+PHSHIFT_1)&0xff000000)>>24;
 	int idxc = ((sine_loc+PHSHIFT_2)&0xff000000)>>24;
 
-	uint8_t mult = sin_mult;
+	uint8_t mult = ((uint16_t)sin_mult * (uint16_t)currlim_mult)>>8;
 	TIM1->CCR1 = (PWM_MID) + ((mult*sine[idxa])>>14);
 	TIM1->CCR2 = (PWM_MID) + ((mult*sine[idxb])>>14);
 	TIM1->CCR3 = (PWM_MID) + ((mult*sine[idxc])>>14);
@@ -267,9 +266,13 @@ void tim1_inthandler()
 	{
 		if(!halls[i] && prev_halls[i] && !ignore_halls[i]) // Got a pulse from one of the hall sensors.
 		{
-			err = (hall_aims[i] + hall_aim_f_comp*f) - (int)loc;
+			if(reverse)
+				err = (int)loc - (hall_aims[i] + hall_aim_f_comp*f);
+			else
+				err = (hall_aims[i] + hall_aim_f_comp*f) - (int)loc;
 			derr = (err - prev_err)>>d_shift; // D term
 			ignore_halls[i] = 5; // ignore the said sensor for some time (for debouncing)
+
 			break; // Only one hall can trigger at once; otherwise is an error condition (todo: maybe check&recover)
 		}
 	}
@@ -283,14 +286,26 @@ void tim1_inthandler()
 	if(f<(MIN_FREQ)) f = (MIN_FREQ);
 	else if(f>(MAX_FREQ)) f = (MAX_FREQ);
 
-	sine_loc = loc+f;
+	if(reverse)
+		sine_loc = loc-f;
+	else
+		sine_loc = loc+f;
 	freq = f;
 
 	prev_halls[0] = halls[0];
 	prev_halls[1] = halls[1];
 	prev_halls[2] = halls[2];
 
-	LED_OFF();
+	if(OVERCURR())
+	{
+		LED_ON();
+		currlim_mult-=50;
+		if(currlim_mult < 5) currlim_mult = 5;
+	}
+	else if(currlim_mult < 255)
+		currlim_mult++;
+
+//	dbg=(((latest_adc.cur_b-512)&(0xff<<2))>>2<<8) | (((latest_adc.cur_c-512)&(0xff<<2))>>2);
 }
 
 int main()
@@ -361,7 +376,7 @@ int main()
 	TIM1->DIER = 1UL /*Update interrupt enable*/;
 	TIM1->CR1 |= 1; // Enable the timer
 
-	set_prot_lim(2000);
+	set_prot_lim(5000);
 	DAC->CR |= 1; // enable, defaults good otherwise.
 
 	SPI1->CR2 = 0b1111UL<<8 /*16-bit*/ | 1UL<<6 /*RX buffer not empty interrupt*/;
@@ -397,12 +412,13 @@ int main()
 	LED_OFF();
 
 	delay_ms(100);
-//	run_dccal();
+	run_dccal();
 
 	// todo: pullup in NSS (PA15)
 
 	int new_mult=50;
 
+	int cnt = 0;
 	while(1)
 	{
 /*		LED_ON();
@@ -410,6 +426,13 @@ int main()
 		LED_OFF();
 		delay_ms(50);
 */
+
+		cnt++;
+		if(cnt > 50)
+		{
+			LED_OFF();
+			cnt = 0;
+		}
 
 		delay_ms(5);
 
@@ -443,15 +466,17 @@ int main()
 		else if(mult > new_mult) mult--;
 		sin_mult = mult;
 
-		if(dbg_in == '1') hall_aim=-4000*65536;
-		if(dbg_in == '2') hall_aim=-3000*65536;
-		if(dbg_in == '3') hall_aim=-2000*65536;
-		if(dbg_in == '4') hall_aim=-1000*65536;
-		if(dbg_in == '5') hall_aim=0*65536;
-		if(dbg_in == '6') hall_aim=1000*65536;
-		if(dbg_in == '7') hall_aim=2000*65536;
-		if(dbg_in == '8') hall_aim=3000*65536;
-		if(dbg_in == '9') hall_aim=4000*65536;
+		if(dbg_in == '1') hall_aim=0*65536;
+		if(dbg_in == '2') hall_aim=1000*65536;
+		if(dbg_in == '3') hall_aim=2000*65536;
+		if(dbg_in == '4') hall_aim=3000*65536;
+		if(dbg_in == '5') hall_aim=4000*65536; // optimum in slow(e=20) torque-requiring forward
+		if(dbg_in == '6') hall_aim=5000*65536;
+		if(dbg_in == '7') hall_aim=6000*65536; // optimum in fast(u=80) low-torque forward and reverse
+		if(dbg_in == '8') hall_aim=7000*65536;
+		if(dbg_in == '9') hall_aim=8000*65536; // optimum in slow(e=20) torque-requiring reverse 
+		if(dbg_in == '0') hall_aim=9000*65536;
+		if(dbg_in == '+') hall_aim=10000*65536;
 
 		if(dbg_in == 'z') d_shift=24;
 		if(dbg_in == 'x') d_shift=14;
@@ -467,6 +492,15 @@ int main()
 		if(dbg_in == 'k') pi_shift=30;
 		if(dbg_in == 'l') pi_shift=29;
 
+		if(dbg_in == 'Z') set_prot_lim(2500);
+		if(dbg_in == 'X') set_prot_lim(5000);
+		if(dbg_in == 'C') set_prot_lim(10000);
+		if(dbg_in == 'V') set_prot_lim(16000);
+
+		if(dbg_in == 'B') run_dccal();
+
+		if(dbg_in == 'R') reverse = 1;
+		if(dbg_in == 'F') reverse = 0;
 
 		dbg = (freq&0xffff0000)>>16;
 
