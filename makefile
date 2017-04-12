@@ -24,7 +24,7 @@ main.bin: $(OBJ)
 	$(SIZE) main.elf
 
 flash: main.bin
-	sudo stm32sprog -b 230400 -vw main.bin
+	sudo stm32sprog -d /dev/ttyUSB1 -b 230400 -vw main.bin
 
 stack:
 	cat *.su

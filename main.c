@@ -15,8 +15,11 @@
 #define EN_DCCAL()  {GPIOA->BSRR = 1UL<<12;}
 #define DIS_DCCAL() {GPIOA->BSRR = 1UL<<(12+16);}
 
+#define HALL_C() (GPIOB->IDR & (1UL<<8))
+#define HALL_B() (GPIOB->IDR & (1UL<<7))
+#define HALL_A() (GPIOB->IDR & (1UL<<6))
 
-int bldc = 0;
+int bldc = 1;
 
 void delay_us(uint32_t i)
 {
@@ -110,10 +113,14 @@ int16_t dccal_b;
 #define NUM_ADC_SAMPLES 1
 adc_data_t latest_adc;
 
+volatile uint16_t dbg = 0;
+volatile uint16_t dbg_in = 0;
 
 void spi_inthandler()
 {
-	static int send_cnt = 1;
+	dbg_in = SPI1->DR & 0x7f;
+	SPI1->DR = dbg;
+/*	static int send_cnt = 1;
 	uint16_t msg = SPI1->DR;
 	uint16_t cmd = (msg&(0b111111<<10)) >> 10;
 	uint16_t param = msg&0x3FF;
@@ -147,6 +154,7 @@ void spi_inthandler()
 	send_cnt++;
 	if(send_cnt > 2)
 		send_cnt = 1;
+*/
 }
 
 void run_dccal()
@@ -228,9 +236,9 @@ int main()
 	if(bldc)
 		TIM1->CCER |= 1UL<<8 /*OC3 on*/ | 1UL<<10 /*OC3 complementary output enable*/;
 
-	TIM1->CCR1 = 50;
-	TIM1->CCR2 = 100;
-	TIM1->CCR3 = 150;
+	TIM1->CCR1 = 512;
+	TIM1->CCR2 = 512;
+	TIM1->CCR3 = 512;
 	TIM1->BDTR = 1UL<<15 /*Main output enable*/ | 1UL /*21ns deadtime*/;
 	TIM1->EGR |= 1; // Generate Reinit+update
 	TIM1->CR1 |= 1; // Enable
@@ -265,20 +273,114 @@ int main()
 
 	NVIC_EnableIRQ(SPI1_IRQn);
 	__enable_irq();
-	EN_GATE();
+//	EN_GATE();
 
 	LED_OFF();
 
 	delay_ms(100);
-	run_dccal();
+//	run_dccal();
 
 	// todo: pullup in NSS (PA15)
+
+	int sine[32] = {0,12,25,37,50,62,75,87,100,87,75,62,50,37,25,12,0,-12,-25,-37,-50,-62,-75,-87,-100,-87,-75,-62,-50,-37,-25,-12};
+	int sine_cnt = 0;
+	int prev_hall = 0;
+	int hall_setpoint = 10;
+	int delay=10000;
+	int power=1;
 	while(1)
 	{
-		LED_ON();
-		delay_ms(100);
+/*		LED_ON();
+		delay_ms(50);
 		LED_OFF();
-		delay_ms(100);
+		delay_ms(50);
+*/
+
+		sine_cnt++;
+		if(sine_cnt > 31)
+			sine_cnt = 0;
+
+		int a = sine_cnt;
+		int b = sine_cnt+11;
+		int c = sine_cnt+21;
+
+		if(b>31) b-= 32;
+		if(c>31) c-= 32;
+
+		if(power == 1)
+		{		
+			TIM1->CCR1 = 512 + (sine[a]>>1);
+			TIM1->CCR2 = 512 + (sine[b]>>1);
+			TIM1->CCR3 = 512 + (sine[c]>>1);
+		}
+		else if(power == 2)
+		{
+			TIM1->CCR1 = 512 + (sine[a]>>0);
+			TIM1->CCR2 = 512 + (sine[b]>>0);
+			TIM1->CCR3 = 512 + (sine[c]>>0);
+		}
+		else
+		{		
+			TIM1->CCR1 = 512 + (sine[a]>>2);
+			TIM1->CCR2 = 512 + (sine[b]>>2);
+			TIM1->CCR3 = 512 + (sine[c]>>2);
+		}
+
+
+		int hall_error = 0;
+		int hall = HALL_B();
+		if(!hall && prev_hall) // got the pulse
+		{
+			int hall_location = sine_cnt;
+			hall_error = hall_location-hall_setpoint;
+		}
+		prev_hall = hall;
+
+		if(delay < 5000)
+			delay += hall_error*300;
+		else if(delay < 10000)
+			delay += hall_error*400;
+		else if(delay < 15000)
+			delay += hall_error*800;
+		else
+			delay += hall_error*1200;
+
+		if(delay < 3000) delay=3000;
+		if(delay > 20000) delay=20000;
+
+		dbg = delay;
+
+		delay_us(delay);
+
+		if(dbg_in == 'a')
+		{
+			LED_ON();
+			EN_GATE();
+		}
+
+		if(dbg_in == 's')
+		{
+			LED_OFF();
+			DIS_GATE();
+		}
+
+		if(dbg_in == '1') hall_setpoint = 8;
+		if(dbg_in == '2') hall_setpoint = 9;
+		if(dbg_in == '3') hall_setpoint = 10;
+		if(dbg_in == '4') hall_setpoint = 11;
+		if(dbg_in == '5') hall_setpoint = 12;
+		if(dbg_in == '7') power = 0;
+		if(dbg_in == '8') power = 1;
+		if(dbg_in == '9') power = 2;
+
+
+	
+/*		int val = 0;
+		if(HALL_A()) val |= 1;
+		if(HALL_B()) val |= 2;
+		if(HALL_C()) val |= 4;
+		dbg = val;
+*/
 
 //		if(ADC1->ISR & 2)
 //			LED_ON();
