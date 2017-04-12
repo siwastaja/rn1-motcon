@@ -204,22 +204,31 @@ void run_dccal()
 volatile uint32_t sine_loc = 0;
 
 #define PWM_MID 512
-
-volatile uint32_t freq = 4*65536;
-volatile uint32_t hall_aim = 20000*65536;
-
 #define MIN_FREQ 1*65536
 #define MAX_FREQ 100*65536
 
+volatile uint32_t freq = MIN_FREQ*10;
+volatile uint32_t hall_aim = 0; // 25000*65536;
+
+
 volatile uint8_t sin_mult = 64;
 
-volatile int d_shift = 12;
-volatile int pi_shift = 31;
+volatile int d_shift = 13;
+volatile int pi_shift = 32;
 int hall_aim_f_comp = 30;
+
+
+// aim: HALLA 42000*65536
+// aim: HALLB 0*65536
+// aim: HALLC 25000*65536?
+
+#define PHSHIFT_1 (1431655765UL)
+#define PHSHIFT_2 (2863311531UL)
 
 void tim1_inthandler()
 {
 	static int prev_halls[3];
+	static int ignore_halls[3] = {0,0,0};
 	static int prev_err;
 
 	TIM1->SR = 0; // Clear interrupt flags
@@ -227,8 +236,8 @@ void tim1_inthandler()
 	uint32_t loc = sine_loc;
 
 	int idxa = ((sine_loc)&0xff000000)>>24;
-	int idxb = ((sine_loc+1431655765UL)&0xff000000)>>24;
-	int idxc = ((sine_loc+2863311531UL)&0xff000000)>>24;
+	int idxb = ((sine_loc+PHSHIFT_1)&0xff000000)>>24;
+	int idxc = ((sine_loc+PHSHIFT_2)&0xff000000)>>24;
 
 	uint8_t mult = sin_mult;
 	TIM1->CCR1 = (PWM_MID) + ((mult*sine[idxa])>>14);
@@ -236,38 +245,51 @@ void tim1_inthandler()
 	TIM1->CCR3 = (PWM_MID) + ((mult*sine[idxc])>>14);
 
 	int halls[3];
-	halls[0] = 1; //HALL_A();
+	halls[0] = HALL_A();
 	halls[1] = HALL_B();
-	halls[2] = 1; //HALL_C();
+	halls[2] = HALL_C();
 
 	int err = 0;
 	int derr = 0;
 	int f = freq;
-	if(!halls[1] && prev_halls[1])
-	{
-//		dbg = (loc&0xffff0000)>>16;
-		err = ((int)hall_aim + hall_aim_f_comp*f) - (int)loc;
-		derr = (err - prev_err)>>d_shift; // D term
-		dbg = ((int)hall_aim + hall_aim_f_comp*f)>>16;
-//		dbg = derr;
-//		dbg = err>>16;
-	}
+	int i;
 
-	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term */ + derr;
-	prev_err = err;
+	int hall_aims[3];
+	hall_aims[0] = hall_aim+PHSHIFT_2;
+	hall_aims[1] = hall_aim;
+	hall_aims[2] = hall_aim+PHSHIFT_1;
+
+	if(ignore_halls[0]) ignore_halls[0]--;
+	if(ignore_halls[1]) ignore_halls[1]--;
+	if(ignore_halls[2]) ignore_halls[2]--;
+
+	for(i=0; i < 3; i++)
+	{
+		if(!halls[i] && prev_halls[i] && !ignore_halls[i]) // Got a pulse from one of the hall sensors.
+		{
+			err = (hall_aims[i] + hall_aim_f_comp*f) - (int)loc;
+			derr = (err - prev_err)>>d_shift; // D term
+			ignore_halls[i] = 5; // ignore the said sensor for some time (for debouncing)
+			break; // Only one hall can trigger at once; otherwise is an error condition (todo: maybe check&recover)
+		}
+	}
 
 	if(derr > (MAX_FREQ)) derr = (MAX_FREQ);
 	if(derr < -(MAX_FREQ)) derr = -(MAX_FREQ);
 
+	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term */ + derr;
+	prev_err = err;
+
 	if(f<(MIN_FREQ)) f = (MIN_FREQ);
 	else if(f>(MAX_FREQ)) f = (MAX_FREQ);
+
+	sine_loc = loc+f;
+	freq = f;
 
 	prev_halls[0] = halls[0];
 	prev_halls[1] = halls[1];
 	prev_halls[2] = halls[2];
 
-	sine_loc = loc+f;
-	freq = f;
 	LED_OFF();
 }
 
@@ -401,6 +423,8 @@ int main()
 		{
 //			LED_OFF();
 			DIS_GATE();
+			freq = MIN_FREQ;
+			sin_mult = 40;
 		}
 
 		if(dbg_in == 'q') new_mult=10;
@@ -419,15 +443,15 @@ int main()
 		else if(mult > new_mult) mult--;
 		sin_mult = mult;
 
-		if(dbg_in == '1') hall_aim=21000*65536;
-		if(dbg_in == '2') hall_aim=21500*65536;
-		if(dbg_in == '3') hall_aim=22000*65536;
-		if(dbg_in == '4') hall_aim=22500*65536;
-		if(dbg_in == '5') hall_aim=23000*65536;
-		if(dbg_in == '6') hall_aim=23500*65536;
-		if(dbg_in == '7') hall_aim=24000*65536;
-		if(dbg_in == '8') hall_aim=24500*65536;
-		if(dbg_in == '9') hall_aim=25000*65536;
+		if(dbg_in == '1') hall_aim=-4000*65536;
+		if(dbg_in == '2') hall_aim=-3000*65536;
+		if(dbg_in == '3') hall_aim=-2000*65536;
+		if(dbg_in == '4') hall_aim=-1000*65536;
+		if(dbg_in == '5') hall_aim=0*65536;
+		if(dbg_in == '6') hall_aim=1000*65536;
+		if(dbg_in == '7') hall_aim=2000*65536;
+		if(dbg_in == '8') hall_aim=3000*65536;
+		if(dbg_in == '9') hall_aim=4000*65536;
 
 		if(dbg_in == 'z') d_shift=24;
 		if(dbg_in == 'x') d_shift=14;
@@ -444,8 +468,12 @@ int main()
 		if(dbg_in == 'l') pi_shift=29;
 
 
-//		dbg = (freq&0xffff0000)>>16;
+		dbg = (freq&0xffff0000)>>16;
 
+//		dbg = 0;
+//		if(HALL_A()) dbg |= 1;
+//		if(HALL_B()) dbg |= 2;
+//		if(HALL_C()) dbg |= 4;
 
 //		if(ADC1->ISR & 2)
 //			LED_ON();
