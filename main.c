@@ -230,6 +230,8 @@ void tim1_inthandler()
 	static int ignore_halls[3] = {0,0,0};
 	static int prev_err;
 	static int currlim_mult = 255;
+	static int cnt = 0;
+	static int prev_hall_cnt;
 
 	TIM1->SR = 0; // Clear interrupt flags
 	uint32_t loc = sine_loc;
@@ -248,8 +250,11 @@ void tim1_inthandler()
 	halls[1] = HALL_B();
 	halls[2] = HALL_C();
 
-	int err = 0;
-	int derr = 0;
+//	int err = 0;
+//	int derr = 0;
+
+	cnt++;
+
 	int f = freq;
 	int i;
 
@@ -262,26 +267,36 @@ void tim1_inthandler()
 	if(ignore_halls[1]) ignore_halls[1]--;
 	if(ignore_halls[2]) ignore_halls[2]--;
 
+	int f_tentative = (PHSHIFT_1)/((cnt-prev_hall_cnt));
+
+	if(f_tentative < (MIN_FREQ)) f = (MIN_FREQ);
+
 	for(i=0; i < 3; i++)
 	{
 		if(!halls[i] && prev_halls[i] && !ignore_halls[i]) // Got a pulse from one of the hall sensors.
 		{
-			if(reverse)
-				err = (int)loc - (hall_aims[i] + hall_aim_f_comp*f);
-			else
-				err = (hall_aims[i] + hall_aim_f_comp*f) - (int)loc;
-			derr = (err - prev_err)>>d_shift; // D term
+//			if(reverse)
+//				err = (int)loc - (hall_aims[i] + hall_aim_f_comp*f);
+//			else
+//				err = (hall_aims[i] + hall_aim_f_comp*f) - (int)loc;
+//			derr = (err - prev_err)>>d_shift; // D term
 			ignore_halls[i] = 5; // ignore the said sensor for some time (for debouncing)
 
+			loc = hall_aims[i];
+
+			f = f_tentative;
+			prev_hall_cnt = cnt;
 			break; // Only one hall can trigger at once; otherwise is an error condition (todo: maybe check&recover)
 		}
 	}
 
-	if(derr > (MAX_FREQ)) derr = (MAX_FREQ);
-	if(derr < -(MAX_FREQ)) derr = -(MAX_FREQ);
 
-	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term */ + derr;
-	prev_err = err;
+
+//	if(derr > (MAX_FREQ)) derr = (MAX_FREQ);
+//	if(derr < -(MAX_FREQ)) derr = -(MAX_FREQ);
+
+//	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term */ + derr;
+//	prev_err = err;
 
 	if(f<(MIN_FREQ)) f = (MIN_FREQ);
 	else if(f>(MAX_FREQ)) f = (MAX_FREQ);
