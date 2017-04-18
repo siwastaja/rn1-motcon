@@ -6,7 +6,7 @@
 #include "ext_include/stm32f0xx.h"
 #include "own_std.h"
 
-#define LED_ON()  {GPIOF->BSRR = 1UL;}
+#define LED_ON()  {} //{GPIOF->BSRR = 1UL;}
 #define LED_OFF() {GPIOF->BSRR = 1UL<<16;}
 
 #define EN_GATE()  {GPIOA->BSRR = 1UL<<11;}
@@ -43,6 +43,7 @@ const int sine[256] =
 -12539,-11792,-11038,-10278,-9511,-8739,-7961,-7179,-6392,-5601,-4807,-4011,-3211,-2410,-1607,-804
 };
 
+void delay_us(uint32_t i) __attribute__((section(".flasher")));
 void delay_us(uint32_t i)
 {
 	if(i==0) return;
@@ -52,6 +53,7 @@ void delay_us(uint32_t i)
 		__asm__ __volatile__ ("nop");
 }
 
+void delay_ms(uint32_t i) __attribute__((section(".flasher")));
 void delay_ms(uint32_t i)
 {
 	while(i--)
@@ -81,9 +83,6 @@ void error(int code)
 
 void adc_int_handler()
 {
-	LED_ON();
-	delay_ms(50);
-	LED_OFF();
 	ADC1->ISR |= 1UL<<7;
 }
 
@@ -105,21 +104,71 @@ void set_prot_lim(int ma)
 	DAC->DHR12R1 = ma;
 }
 
+// 1024 equals 3V3; after gain=40, it's 82.5mV; with 1mOhm, it's 82.5A.
+// i.e., 81mA per unit.
+
+volatile int neg_curr_lim = -20;
+volatile int pos_curr_lim = 20;
+
+void set_curr_lim(int ma)
+{
+	// Protection limit set at 1.25x soft limit + 2A constant extra.
+	set_prot_lim(((ma*5)>>2)+2000);
+
+	neg_curr_lim = ma/-81;
+	pos_curr_lim = ma/81;
+}
+
+volatile int new_mult=0;
+
+volatile int timeout = 50;
+
+volatile int reverse = 0;
+
+#define PWM_MID 512
+#define MIN_FREQ 1*65536
+#define MAX_FREQ 100*65536
+
+volatile uint32_t freq = MIN_FREQ*10;
+volatile uint32_t hall_aim = 5000*65536;
+
 
 void forward(uint16_t speed)
 {
+	EN_GATE();
+	timeout = 50;
 	if(speed > 400)
 		speed = 400;
-	TIM1->CCR1 = 0;
-	TIM1->CCR2 = speed;
+
+	reverse = 0;
+	if(bldc)
+	{
+		new_mult = speed>>1;		
+	}
+	else
+	{
+		TIM1->CCR1 = 0;
+		TIM1->CCR2 = speed;
+	}
 }
 
 void backward(uint16_t speed)
 {
+	EN_GATE();
+	timeout = 50;
 	if(speed > 400)
 		speed = 400;
-	TIM1->CCR1 = speed;
-	TIM1->CCR2 = 0;
+
+	reverse = 1;
+	if(bldc)
+	{
+		new_mult = speed>>1;
+	}
+	else
+	{
+		TIM1->CCR1 = speed;
+		TIM1->CCR2 = 0;
+	}
 }
 
 typedef struct
@@ -132,28 +181,61 @@ int16_t dccal_c;
 int16_t dccal_b;
 
 
-#define NUM_ADC_SAMPLES 1
-adc_data_t latest_adc;
+#define NUM_ADC_SAMPLES 2
+adc_data_t latest_adc[2];
 
-volatile uint16_t dbg = 0;
-volatile uint16_t dbg_in = 0;
+//volatile uint16_t dbg = 0;
+//volatile uint16_t dbg_in = 0;
+
+volatile uint8_t sin_mult;
+
+volatile int latest_current;
+
+extern void flasher() __attribute__((section(".flasher")));
+
+void run_flasher()
+{
+	DIS_GATE();
+	__disable_irq();
+	// Reconfig SPI to run without interrupts.
+	SPI1->CR1 = 0; // Disable SPI
+	delay_us(10);
+	SPI1->CR2 = 0b1111UL<<8 /*16-bit*/;
+	SPI1->CR1 = 1UL<<6; // Enable SPI
+
+	flasher();
+}
 
 void spi_inthandler()
 {
-	dbg_in = SPI1->DR & 0x7f;
-	SPI1->DR = dbg;
-/*	static int send_cnt = 1;
+	static int flasher_sequence = 0;
+	static int send_cnt = 1;
 	uint16_t msg = SPI1->DR;
 	uint16_t cmd = (msg&(0b111111<<10)) >> 10;
 	uint16_t param = msg&0x3FF;
+
+	if(flasher_sequence) flasher_sequence--;
+
 	switch(cmd)
 	{
 		case 11:
-			forward(param);
+		forward(param);
 		break;
+
 		case 12:
-			backward(param);
+		backward(param);
 		break;
+
+		case 60:
+		if(param == 234 && flasher_sequence == 0)
+			flasher_sequence=2;
+		break;
+
+		case 55:
+		if(param == 345 && flasher_sequence)
+			run_flasher();
+		break;
+
 		default:
 		break;
 	}
@@ -163,10 +245,10 @@ void spi_inthandler()
 	switch(send_cnt)
 	{
 		case 1:
-		data_out = latest_adc.cur_c - dccal_c + 512;
+		data_out = latest_current&0x3FF;
 		break;
 		case 2:
-		data_out = latest_adc.cur_b - dccal_b + 512;
+		data_out = (freq>>15)&0x3FF;
 		break;
 		default:
 		break;
@@ -176,7 +258,7 @@ void spi_inthandler()
 	send_cnt++;
 	if(send_cnt > 2)
 		send_cnt = 1;
-*/
+
 }
 
 void run_dccal()
@@ -186,11 +268,11 @@ void run_dccal()
 	int c = 0;
 	int b = 0;
 	delay_ms(10);
-	for(i = 0; i < 256; i++)
+	for(i = 0; i < 128; i++)
 	{
 		while(!(DMA1->ISR & 1)) ; // Wait for DMAch1 transfer complete
-		b += latest_adc.cur_b;
-		c += latest_adc.cur_c;
+		b += latest_adc[0].cur_b + latest_adc[1].cur_b;
+		c += latest_adc[0].cur_c + latest_adc[1].cur_c;
 	}
 	DIS_DCCAL();
 	dccal_b = b>>8;
@@ -205,24 +287,15 @@ void run_dccal()
 
 volatile uint32_t sine_loc = 0;
 
-#define PWM_MID 512
-#define MIN_FREQ 1*65536
-#define MAX_FREQ 100*65536
-
-volatile uint32_t freq = MIN_FREQ*10;
-volatile uint32_t hall_aim = 4000*65536;
-
-
-volatile uint8_t sin_mult = 64;
 
 volatile int d_shift = 13;
 volatile int pi_shift = 32;
 int hall_aim_f_comp = 0;
 
-volatile int reverse = 0;
-
 #define PHSHIFT_1 (1431655765UL)
 #define PHSHIFT_2 (2863311531UL)
+
+volatile int led_short = 0;
 
 void tim1_inthandler()
 {
@@ -232,6 +305,7 @@ void tim1_inthandler()
 	static int currlim_mult = 255;
 	static int cnt = 0;
 	static int prev_hall_cnt;
+
 
 	TIM1->SR = 0; // Clear interrupt flags
 	uint32_t loc = sine_loc;
@@ -311,16 +385,31 @@ void tim1_inthandler()
 	prev_halls[1] = halls[1];
 	prev_halls[2] = halls[2];
 
+	int current = latest_adc[1].cur_b-dccal_b; // Temporary solution, adc timing must be improved
+
+	latest_current = current;
+
 	if(OVERCURR())
 	{
-		LED_ON();
+		LED_ON(); led_short = 0;
 		currlim_mult-=50;
-		if(currlim_mult < 5) currlim_mult = 5;
+	}
+	else if(current < neg_curr_lim || current > pos_curr_lim)
+	{
+		LED_ON(); led_short = 1;
+		currlim_mult-=2;
 	}
 	else if(currlim_mult < 255)
 		currlim_mult++;
 
-//	dbg=(((latest_adc.cur_b-512)&(0xff<<2))>>2<<8) | (((latest_adc.cur_c-512)&(0xff<<2))>>2);
+	if(currlim_mult < 5) currlim_mult = 5;
+
+//	dbg = current;
+
+//	int vasen = latest_adc[0].cur_b-512;
+//	int oikea = latest_adc[1].cur_b-512;
+
+//	dbg = ((int8_t)(vasen>>2))<<8 | (int8_t)(oikea>>2);
 }
 
 int main()
@@ -368,13 +457,20 @@ int main()
 	// SPI1 is at AF0, so defaults OK.
 
 
+	/*
+		TIM1:
+
+		OC4 is used to trigger the ADC.
+	*/
 
 	TIM1->CR1 = 0b01UL<<5 /*centermode 1*/;
 	TIM1->CR2 = 0b010UL<<4 /*Update event sends trigger output TRGO*/;
+//	TIM1->CR2 = 0b111UL<<4 /*OC4REF --> TRGO*/;
 
 	TIM1->CCMR1 = 1UL<<3 /*OC1 Preload enable*/ | 0b110UL<<4 /*OC1 PWMmode 1*/ |
 	              1UL<<11 /*OC2 Preload Enable*/| 0b110UL<<12 /*OC2 PWMmode 1*/;
-	TIM1->CCMR2 = 1UL<<3 /*OC3 Preload enable*/ | 0b110UL<<4 /*OC3 PWMmode 1*/;
+	TIM1->CCMR2 = 1UL<<3 /*OC3 Preload enable*/ | 0b110UL<<4 /*OC3 PWMmode 1*/ |
+	              0b011UL<<12 /*OC4 toggle-on-match mode*/;
 	TIM1->CCER =  1UL<<0 /*OC1 on*/ | 1UL<<2 /*OC1 complementary output enable*/ |
 	              1UL<<4 /*OC2 on*/ | 1UL<<6 /*OC2 complementary output enable*/;
 
@@ -386,6 +482,7 @@ int main()
 	TIM1->CCR1 = 512;
 	TIM1->CCR2 = 512;
 	TIM1->CCR3 = 512;
+	TIM1->CCR4 = 1020; // Generate the ADC trigger right after the start of the switch period.
 	TIM1->BDTR = 1UL<<15 /*Main output enable*/ | 1UL /*21ns deadtime*/;
 	TIM1->EGR |= 1; // Generate Reinit+update
 	TIM1->DIER = 1UL /*Update interrupt enable*/;
@@ -399,7 +496,7 @@ int main()
 
 	// Enable DMA: channel 1 for ADC.
 	DMA1_Channel1->CPAR = (uint32_t)&(ADC1->DR);
-	DMA1_Channel1->CMAR = (uint32_t)(&latest_adc);
+	DMA1_Channel1->CMAR = (uint32_t)(latest_adc);
 	DMA1_Channel1->CNDTR = 2*NUM_ADC_SAMPLES;
 	DMA1_Channel1->CCR = 0b011010110101000UL; // very high prio, 16b->16b, MemIncrement, circular, transfer error interrupt, enable.
 
@@ -409,8 +506,8 @@ int main()
 	ADC1->CR |= ADC_CR_ADCAL;
 	while((ADC1->CR & ADC_CR_ADCAL) != 0);
 
-	ADC1->CFGR1 = ADC_CFGR1_DMACFG | ADC_CFGR1_DMAEN | 0b01UL<<10 /*01:HW trigger rising edge*/ | 0UL<<6 /*TIM1 trigger*/ | 01UL<<3 /*10-bit reso*/;
-	ADC1->SMPR = 0b001UL; // Sampling time = 7.5 ADC clock cycles
+	ADC1->CFGR1 = ADC_CFGR1_DMACFG | ADC_CFGR1_DMAEN | 0b01UL<<10 /*10:HW trigger rising edge*/ | 0UL<<6 /*TIM1 trigger*/ | 01UL<<3 /*10-bit reso*/ | 1UL<<2 /*dir*/;
+	ADC1->SMPR = 0b001UL; // Sampling time = 7.5 ADC clock cycles 
 
 	ADC1->CHSELR = 1UL<<6 | 1UL<<5;
 	DMA1_Channel1->CCR |= 1UL;
@@ -422,35 +519,48 @@ int main()
 	NVIC_EnableIRQ(SPI1_IRQn);
 	NVIC_EnableIRQ(TIM1_BRK_UP_TRG_COM_IRQn);
 	__enable_irq();
-//	EN_GATE();
-
-	LED_OFF();
-
-	delay_ms(100);
+	EN_GATE();
+	delay_ms(50);
 	run_dccal();
+	DIS_GATE();
+	delay_ms(10);	
+	LED_OFF();
 
 	// todo: pullup in NSS (PA15)
 
-	int new_mult=50;
+	set_curr_lim(20000);
 
 	int cnt = 0;
 	while(1)
 	{
-/*		LED_ON();
-		delay_ms(50);
-		LED_OFF();
-		delay_ms(50);
-*/
-
 		cnt++;
-		if(cnt > 50)
+		if(led_short && cnt > 2)
+		{
+			LED_OFF();
+			cnt = 0;
+		}
+		else if(cnt > 100)
 		{
 			LED_OFF();
 			cnt = 0;
 		}
 
-		delay_ms(5);
+		delay_ms(2);
 
+		int mult = sin_mult;
+		if(mult < new_mult) mult++;
+		else if(mult > new_mult) mult--;
+		sin_mult = mult;
+
+		if(timeout) timeout--;
+		else
+		{
+			new_mult = 0;
+			sin_mult = 0;
+			DIS_GATE();
+		}
+
+/*
 		if(dbg_in == 'a')
 		{
 //			LED_ON();
@@ -485,39 +595,25 @@ int main()
 		if(dbg_in == '2') hall_aim=1000*65536;
 		if(dbg_in == '3') hall_aim=2000*65536;
 		if(dbg_in == '4') hall_aim=3000*65536;
-		if(dbg_in == '5') hall_aim=4000*65536; // optimum in slow(e=20) torque-requiring forward
+		if(dbg_in == '5') hall_aim=4000*65536;
 		if(dbg_in == '6') hall_aim=5000*65536;
-		if(dbg_in == '7') hall_aim=6000*65536; // optimum in fast(u=80) low-torque forward and reverse
+		if(dbg_in == '7') hall_aim=6000*65536;
 		if(dbg_in == '8') hall_aim=7000*65536;
-		if(dbg_in == '9') hall_aim=8000*65536; // optimum in slow(e=20) torque-requiring reverse 
+		if(dbg_in == '9') hall_aim=8000*65536;
 		if(dbg_in == '0') hall_aim=9000*65536;
 		if(dbg_in == '+') hall_aim=10000*65536;
 
-		if(dbg_in == 'z') d_shift=24;
-		if(dbg_in == 'x') d_shift=14;
-		if(dbg_in == 'c') d_shift=13;
-		if(dbg_in == 'v') d_shift=12;
-		if(dbg_in == 'b') d_shift=11;
-		if(dbg_in == 'n') d_shift=10;
-		if(dbg_in == 'm') d_shift=9;
-
-		if(dbg_in == 'g') pi_shift=33;
-		if(dbg_in == 'h') pi_shift=32;
-		if(dbg_in == 'j') pi_shift=31;
-		if(dbg_in == 'k') pi_shift=30;
-		if(dbg_in == 'l') pi_shift=29;
-
-		if(dbg_in == 'Z') set_prot_lim(2500);
-		if(dbg_in == 'X') set_prot_lim(5000);
-		if(dbg_in == 'C') set_prot_lim(10000);
-		if(dbg_in == 'V') set_prot_lim(16000);
+		if(dbg_in == 'Z') set_curr_lim(2000);
+		if(dbg_in == 'X') set_curr_lim(4000);
+		if(dbg_in == 'C') set_curr_lim(8000);
+		if(dbg_in == 'V') set_curr_lim(16000);
 
 		if(dbg_in == 'B') run_dccal();
 
 		if(dbg_in == 'R') reverse = 1;
 		if(dbg_in == 'F') reverse = 0;
 
-		dbg = (freq&0xffff0000)>>16;
+//		dbg = (freq&0xffff0000)>>16;
 
 //		dbg = 0;
 //		if(HALL_A()) dbg |= 1;
@@ -526,12 +622,8 @@ int main()
 
 //		if(ADC1->ISR & 2)
 //			LED_ON();
+*/
 
-/*		char buffer[200];
-		char* buf = buffer;
-		buf = o_str_append(buf, "kakka=");
-		buf = o_utoa16(123, buf);
-		buf = o_str_append(buf, "\n\r");*/
 	}
 
 

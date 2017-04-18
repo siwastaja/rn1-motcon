@@ -9,9 +9,9 @@ CFLAGS = -I. -Os -fno-common -ffunction-sections -ffreestanding -fno-builtin -mt
 ASMFLAGS = -S -fverbose-asm
 LDFLAGS = -mcpu=cortex-m0 -mthumb -nostartfiles -gc-sections
 
-DEPS = main.h own_std.h
-OBJ = stm32init.o main.o own_std.o
-ASMS = stm32init.s main.s own_std.s
+DEPS = main.h own_std.h flash.h
+OBJ = stm32init.o main.o own_std.o flash.o
+ASMS = stm32init.s main.s own_std.s flash.s
 
 all: main.bin
 
@@ -20,11 +20,24 @@ all: main.bin
 
 main.bin: $(OBJ)
 	$(LD) -Tstm32.ld $(LDFLAGS) -o main.elf $^
-	$(OBJCOPY) -Obinary main.elf main.bin
+	$(OBJCOPY) -Obinary main.elf main_full.bin
+	$(OBJCOPY) -Obinary --remove-section=.flasher --remove-section=.settings main.elf main.bin
 	$(SIZE) main.elf
+
+flash_full: main.bin
+	sudo stm32sprog -d /dev/ttyUSB1 -b 230400 -vw main_full.bin
 
 flash: main.bin
 	sudo stm32sprog -d /dev/ttyUSB1 -b 230400 -vw main.bin
+
+f: main.bin
+	../rn1-tools/mcprog ~/dev/robo ./main.bin
+
+f_local: main.bin
+	sudo ../rn1-tools/mcprog /dev/ttyUSB0 ./main.bin 4
+
+ff: main.bin
+	scp main.bin hrst@proto4:~/mc.bin
 
 stack:
 	cat *.su
@@ -42,6 +55,3 @@ asm: $(ASMS)
 
 e: 
 	nano main.c stm32init.c stm32.ld motcon_comm.txt
-
-s:
-	sudo screen /dev/ttyUSB0 115200
