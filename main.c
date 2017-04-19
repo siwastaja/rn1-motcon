@@ -7,7 +7,7 @@
 #include "own_std.h"
 #include "flash.h"
 
-#define LED_ON()  {} //{GPIOF->BSRR = 1UL;}
+#define LED_ON()  {GPIOF->BSRR = 1UL;}
 #define LED_OFF() {GPIOF->BSRR = 1UL<<16;}
 
 #define EN_GATE()  {GPIOA->BSRR = 1UL<<11;}
@@ -20,9 +20,41 @@
 #define HALL_B() (GPIOB->IDR & (1UL<<7))
 #define HALL_A() (GPIOB->IDR & (1UL<<6))
 
+#define HALL_ABC() ((GPIOB->IDR & (0b111<<6))>>6)
+
 #define OVERCURR() (!(GPIOA->IDR & (1UL<<14)))
 
 int bldc = 1;
+
+const int hall_loc[8] =
+{
+ 0, // 000  ERROR
+ 1, // 001
+ 3, // 010
+ 2, // 011
+ 5, // 100
+ 0, // 101
+ 4, // 110
+ 0  // 111  ERROR
+};
+
+const int base_hall_aims[6] =
+{
+	0,
+	PHSHIFT_1/2,
+	PHSHIFT_1,
+	PHSHIFT_1+PHSHIFT_1/2,
+	PHSHIFT_2,
+	PHSHIFT_2+PHSHIFT_1/2
+};
+
+int timing_shift = 0;
+
+int calc_hall_aim()
+{
+	return base_hall_aims[hall_loc[HALL_ABC()]] + timing_shift;
+}
+
 
 const int sine[256] =
 {
@@ -126,6 +158,7 @@ volatile int timeout = 50;
 
 volatile int reverse = 0;
 
+
 #define PWM_MID 512
 #define MIN_FREQ 1*65536
 #define MAX_FREQ 100*65536
@@ -144,7 +177,7 @@ void forward(uint16_t speed)
 	reverse = 0;
 	if(bldc)
 	{
-		new_mult = speed>>1;		
+		new_mult = speed>>1;
 	}
 	else
 	{
@@ -265,7 +298,8 @@ void spi_inthandler()
 		break;
 	}
 
-	SPI1->DR = send_cnt<<10 | data_out;
+//	SPI1->DR = send_cnt<<10 | data_out;
+	SPI1->DR = hall_loc[HALL_ABC()];
 	send_cnt++;
 	if(send_cnt > 2)
 		send_cnt = 1;
@@ -310,16 +344,15 @@ volatile int led_short = 0;
 
 void tim1_inthandler()
 {
-	static int prev_halls[3];
-	static int ignore_halls[3] = {0,0,0};
-	static int prev_err;
 	static int currlim_mult = 255;
 	static int cnt = 0;
 	static int prev_hall_cnt;
+	static int prev_hall_idx;
 
 
 	TIM1->SR = 0; // Clear interrupt flags
-	uint32_t loc = sine_loc;
+//	uint32_t loc = sine_loc;
+	loc = calc_hall_aim();
 
 	int idxa = ((sine_loc)&0xff000000)>>24;
 	int idxb = ((sine_loc+PHSHIFT_1)&0xff000000)>>24;
@@ -330,71 +363,17 @@ void tim1_inthandler()
 	TIM1->CCR2 = (PWM_MID) + ((mult*sine[idxb])>>14);
 	TIM1->CCR3 = (PWM_MID) + ((mult*sine[idxc])>>14);
 
-	int halls[3];
-	halls[0] = HALL_A();
-	halls[1] = HALL_B();
-	halls[2] = HALL_C();
-
-//	int err = 0;
-//	int derr = 0;
-
 	cnt++;
 
 	int f = freq;
 	int i;
 
-	int hall_aims[3];
-	hall_aims[0] = hall_aim+PHSHIFT_2;
-	hall_aims[1] = hall_aim;
-	hall_aims[2] = hall_aim+PHSHIFT_1;
+//	if(reverse)
+//		sine_loc = loc-f;
+//	else
+//		sine_loc = loc+f;
+//	freq = f;
 
-	if(ignore_halls[0]) ignore_halls[0]--;
-	if(ignore_halls[1]) ignore_halls[1]--;
-	if(ignore_halls[2]) ignore_halls[2]--;
-
-	int f_tentative = (PHSHIFT_1)/((cnt-prev_hall_cnt));
-
-	if(f_tentative < (MIN_FREQ)) f = (MIN_FREQ);
-
-	for(i=0; i < 3; i++)
-	{
-		if(!halls[i] && prev_halls[i] && !ignore_halls[i]) // Got a pulse from one of the hall sensors.
-		{
-//			if(reverse)
-//				err = (int)loc - (hall_aims[i] + hall_aim_f_comp*f);
-//			else
-//				err = (hall_aims[i] + hall_aim_f_comp*f) - (int)loc;
-//			derr = (err - prev_err)>>d_shift; // D term
-			ignore_halls[i] = 5; // ignore the said sensor for some time (for debouncing)
-
-			loc = hall_aims[i];
-
-			f = f_tentative;
-			prev_hall_cnt = cnt;
-			break; // Only one hall can trigger at once; otherwise is an error condition (todo: maybe check&recover)
-		}
-	}
-
-
-
-//	if(derr > (MAX_FREQ)) derr = (MAX_FREQ);
-//	if(derr < -(MAX_FREQ)) derr = -(MAX_FREQ);
-
-//	f += (((int64_t)f * (int64_t)err)>>pi_shift) /* PI term */ + derr;
-//	prev_err = err;
-
-	if(f<(MIN_FREQ)) f = (MIN_FREQ);
-	else if(f>(MAX_FREQ)) f = (MAX_FREQ);
-
-	if(reverse)
-		sine_loc = loc-f;
-	else
-		sine_loc = loc+f;
-	freq = f;
-
-	prev_halls[0] = halls[0];
-	prev_halls[1] = halls[1];
-	prev_halls[2] = halls[2];
 
 	int current = latest_adc[1].cur_b-dccal_b; // Temporary solution, adc timing must be improved
 
