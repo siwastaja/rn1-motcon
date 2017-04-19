@@ -23,3 +23,16 @@ Reports:
 1  REPORT1   data=latest current C
 2  REPORT2   data=latest current B
 
+
+
+
+Next revision would be:
+
+SPI packets are delimited by utilizing the nCS.
+
+Data width is still 16-bits, and f still 7.5MHz.
+
+There are no headers, so all 16 bits can be utilized.
+
+Data frame:
+

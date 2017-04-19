@@ -7,6 +7,12 @@
 #include "own_std.h"
 #include "flash.h"
 
+
+#define PWM_MID 512
+#define MIN_FREQ 1*65536
+#define MAX_FREQ 100*65536
+
+
 #define LED_ON()  {GPIOF->BSRR = 1UL;}
 #define LED_OFF() {GPIOF->BSRR = 1UL<<16;}
 
@@ -24,8 +30,46 @@
 
 #define OVERCURR() (!(GPIOA->IDR & (1UL<<14)))
 
-int bldc = 1;
 
+int bldc = 1;
+int timing_shift = 5000*65536;
+
+volatile int neg_curr_lim = -20;
+volatile int pos_curr_lim = 20;
+volatile int new_mult=0;
+volatile int timeout = 50;
+volatile int reverse;
+volatile int do_resync = 10;
+volatile uint32_t freq = MIN_FREQ;
+
+typedef struct
+{
+	int16_t cur_c;
+	int16_t cur_b;
+} adc_data_t;
+
+#define NUM_ADC_SAMPLES 2
+
+adc_data_t latest_adc[2];
+int16_t dccal_c;
+int16_t dccal_b;
+
+volatile uint8_t sin_mult;
+volatile int latest_current;
+volatile uint16_t lost_count, minfreq_count;
+volatile uint32_t sine_loc = 0;
+
+
+volatile int d_shift = 13;
+volatile int pi_shift = 32;
+int hall_aim_f_comp = 0;
+
+volatile int led_short = 0;
+
+/*
+	three adjacent hall io pins (active low) form a 3-bit number which can be used to index hall_loc table,
+	to determine the 6-step position of the rotor.
+*/
 const int hall_loc[8] =
 {
  0, // 000  ERROR
@@ -33,28 +77,32 @@ const int hall_loc[8] =
  3, // 010
  2, // 011
  5, // 100
- 0, // 101
+ 0, // 101  Middle hall active - we'll call this zero position
  4, // 110
  0  // 111  ERROR
 };
 
+#define PHSHIFT (1431655765UL)  // 120 deg shift between the phases in the 32-bit range.
+
 const int base_hall_aims[6] =
 {
 	0,
-	PHSHIFT_1/2,
-	PHSHIFT_1,
-	PHSHIFT_1+PHSHIFT_1/2,
-	PHSHIFT_2,
-	PHSHIFT_2+PHSHIFT_1/2
+	PHSHIFT/2,
+	PHSHIFT,
+	PHSHIFT+PHSHIFT/2,
+	PHSHIFT*2,
+	PHSHIFT*2+PHSHIFT/2
 };
 
-int timing_shift = 0;
 
-int calc_hall_aim()
-{
-	return base_hall_aims[hall_loc[HALL_ABC()]] + timing_shift;
-}
 
+#define HALL_LOC() (hall_loc[HALL_ABC()])
+#define HALL_AIM(l) (base_hall_aims[(l)] + timing_shift)
+
+/*
+The sine table is indexed with 8 MSBs of uint32; this way, a huge resolution is implemented for the frequency,
+since the frequency is a term added to the indexing each round.
+*/
 
 const int sine[256] =
 {
@@ -98,6 +146,8 @@ void delay_ms(uint32_t i)
 
 void error(int code)
 {
+	DIS_GATE();
+	__disable_irq();
 	int i = 0;
 	while(1)
 	{
@@ -119,6 +169,12 @@ void adc_int_handler()
 	ADC1->ISR |= 1UL<<7;
 }
 
+/*
+	Protection current limit: the FET driver measures the MOSFET Vds while the FETs are turned on
+	and compares it to an analog input pin; in case of overcurrent, the driver instantly blanks the
+	FETs out (and gives overcurrent signal to the MCU). This is only meant for protection; not normal
+	operation.
+*/
 #define MAX_PROT_LIM 40000 // mA
 #define MIN_PROT_LIM 1000 // mA
 void set_prot_lim(int ma)
@@ -137,12 +193,15 @@ void set_prot_lim(int ma)
 	DAC->DHR12R1 = ma;
 }
 
+
+/*
+	set_curr_lim sets the ADC based normal current limit, and also the protection limit.
+	The protection limit is set considerably higher so that it should never be hit if the ADC-based
+	works as it should.
+*/
+
 // 1024 equals 3V3; after gain=40, it's 82.5mV; with 1mOhm, it's 82.5A.
 // i.e., 81mA per unit.
-
-volatile int neg_curr_lim = -20;
-volatile int pos_curr_lim = 20;
-
 void set_curr_lim(int ma)
 {
 	// Protection limit set at 1.25x soft limit + 2A constant extra.
@@ -151,21 +210,6 @@ void set_curr_lim(int ma)
 	neg_curr_lim = ma/-81;
 	pos_curr_lim = ma/81;
 }
-
-volatile int new_mult=0;
-
-volatile int timeout = 50;
-
-volatile int reverse = 0;
-
-
-#define PWM_MID 512
-#define MIN_FREQ 1*65536
-#define MAX_FREQ 100*65536
-
-volatile uint32_t freq = MIN_FREQ*10;
-volatile uint32_t hall_aim = 5000*65536;
-
 
 void forward(uint16_t speed)
 {
@@ -205,26 +249,6 @@ void backward(uint16_t speed)
 	}
 }
 
-typedef struct
-{
-	int16_t cur_c;
-	int16_t cur_b;
-} adc_data_t;
-
-int16_t dccal_c;
-int16_t dccal_b;
-
-
-#define NUM_ADC_SAMPLES 2
-adc_data_t latest_adc[2];
-
-//volatile uint16_t dbg = 0;
-//volatile uint16_t dbg_in = 0;
-
-volatile uint8_t sin_mult;
-
-volatile int latest_current;
-
 extern void flasher() __attribute__((section(".flasher")));
 
 void run_flasher()
@@ -232,10 +256,7 @@ void run_flasher()
 	DIS_GATE();
 	__disable_irq();
 	// Reconfig SPI to run without interrupts.
-
 	// There seems to be no way of emptying the TX fifo, so we'll be happy sending some false data for the first two transactions.
-//	while(SPI1->SR&(0b11<<11)); // Wait for TX fifo empty
-//	while(SPI1->SR&(1<<7)) ; // Wait until not busy.
 
 	SPI1->CR1 = 0; // Disable SPI
 
@@ -248,7 +269,6 @@ void run_flasher()
 
 	flasher();
 }
-
 
 void spi_inthandler()
 {
@@ -269,6 +289,12 @@ void spi_inthandler()
 		case 12:
 		backward(param);
 		break;
+
+		case 13:
+		timing_shift += 50*65536;
+
+		case 14:
+		timing_shift -= 50*65536;
 
 		case 60:
 		if(param == 234 && flasher_sequence == 0)
@@ -299,7 +325,7 @@ void spi_inthandler()
 	}
 
 //	SPI1->DR = send_cnt<<10 | data_out;
-	SPI1->DR = hall_loc[HALL_ABC()];
+	SPI1->DR = timing_shift>>16;
 	send_cnt++;
 	if(send_cnt > 2)
 		send_cnt = 1;
@@ -330,50 +356,96 @@ void run_dccal()
 	good resolution of the fundamental frequency.
 */
 
-volatile uint32_t sine_loc = 0;
-
-
-volatile int d_shift = 13;
-volatile int pi_shift = 32;
-int hall_aim_f_comp = 0;
-
-#define PHSHIFT_1 (1431655765UL)
-#define PHSHIFT_2 (2863311531UL)
-
-volatile int led_short = 0;
-
 void tim1_inthandler()
 {
 	static int currlim_mult = 255;
 	static int cnt = 0;
-	static int prev_hall_cnt;
-	static int prev_hall_idx;
-
+	static int expected_next_hall_pos;
+	static int expected_next_hall_cnt;
+	static int expected_next_hall_cnt_valid = 0;
+	static int cnt_at_prev_hall_valid = 0;
+	static int cnt_at_prev_hall;
+	static int prev_hall_pos;
 
 	TIM1->SR = 0; // Clear interrupt flags
-//	uint32_t loc = sine_loc;
-	loc = calc_hall_aim();
 
-	int idxa = ((sine_loc)&0xff000000)>>24;
-	int idxb = ((sine_loc+PHSHIFT_1)&0xff000000)>>24;
-	int idxc = ((sine_loc+PHSHIFT_2)&0xff000000)>>24;
+	int hall_pos = HALL_LOC();
 
-	uint8_t mult = ((uint16_t)sin_mult * (uint16_t)currlim_mult)>>8;
-	TIM1->CCR1 = (PWM_MID) + ((mult*sine[idxa])>>14);
+	uint32_t loc = sine_loc;
+	int f = freq;
+
+	int resync = do_resync;
+
+	if(!resync && hall_pos == prev_hall_pos) 
+	{
+		// We haven't advanced a step yet, do sine interpolation
+
+		if(expected_next_hall_cnt_valid && cnt > expected_next_hall_cnt)
+		{
+			// Sine interpolation has advanced to the next hall sync point, but we haven't
+			// received the sync yet. Freeze the sine generation.
+			f = 0;
+			expected_next_hall_cnt_valid = 0;
+		}
+		
+		if(!reverse) loc += f; else loc -= f;
+
+	}
+	else if(!resync && hall_pos == expected_next_hall_pos) 
+	{
+		// We have advanced one step in the right direction - we can synchronize the sine phase, 
+		// and calculate a valid frequency from the delta time.
+		loc = HALL_AIM(hall_pos);
+
+		if(cnt_at_prev_hall_valid)
+		{
+			f = (PHSHIFT)/((cnt-cnt_at_prev_hall));
+			expected_next_hall_cnt =  cnt+(cnt-cnt_at_prev_hall);
+			expected_next_hall_cnt_valid = 1;
+		}
+		else
+		{
+			// if we cannot determine the frequency, we use an absolute minimal frequency we'll ever want to use;
+			// that's slightly better than doing completely without interpolation	
+			minfreq_count++;
+			f = MIN_FREQ; 
+			expected_next_hall_cnt_valid = 0;
+		}
+
+		cnt_at_prev_hall_valid = 1;
+		cnt_at_prev_hall = cnt;
+	}
+	else // We are lost - synchronize the phase to the current hall status
+	{
+		lost_count++;
+		loc = HALL_AIM(hall_pos);
+		cnt_at_prev_hall_valid = 0;
+		expected_next_hall_cnt_valid = 0;
+		f = MIN_FREQ;
+	}
+
+	if(resync) resync--;
+	do_resync = resync;
+
+	prev_hall_pos = hall_pos;
+	expected_next_hall_pos = hall_pos;
+	if(!reverse) { expected_next_hall_pos++; if(expected_next_hall_pos > 5) expected_next_hall_pos = 0; }
+	else         { expected_next_hall_pos--; if(expected_next_hall_pos < 0) expected_next_hall_pos = 5; }
+
+	int idxa = ((loc)&0xff000000)>>24;
+	int idxb = ((loc+PHSHIFT)&0xff000000)>>24;
+	int idxc = ((loc+2*PHSHIFT)&0xff000000)>>24;
+
+
+	uint8_t mult = ((uint16_t)sin_mult * (uint16_t)currlim_mult)>>8; // 254 max
+	TIM1->CCR1 = (PWM_MID) + ((mult*sine[idxa])>>14); // 4 to 1019. 
 	TIM1->CCR2 = (PWM_MID) + ((mult*sine[idxb])>>14);
 	TIM1->CCR3 = (PWM_MID) + ((mult*sine[idxc])>>14);
 
 	cnt++;
 
-	int f = freq;
-	int i;
-
-//	if(reverse)
-//		sine_loc = loc-f;
-//	else
-//		sine_loc = loc+f;
-//	freq = f;
-
+	sine_loc = loc;
+	freq = f;
 
 	int current = latest_adc[1].cur_b-dccal_b; // Temporary solution, adc timing must be improved
 
@@ -518,24 +590,24 @@ int main()
 
 	// todo: pullup in NSS (PA15)
 
-	set_curr_lim(20000);
+	set_curr_lim(15000);
 
 	int cnt = 0;
 	while(1)
 	{
 		cnt++;
-		if(led_short && cnt > 2)
+		if(led_short && cnt > 4)
 		{
 			LED_OFF();
 			cnt = 0;
 		}
-		else if(cnt > 100)
+		else if(cnt > 200)
 		{
 			LED_OFF();
 			cnt = 0;
 		}
 
-		delay_ms(2);
+		delay_ms(1);
 
 		int mult = sin_mult;
 		if(mult < new_mult) mult++;
@@ -549,71 +621,6 @@ int main()
 			sin_mult = 0;
 			DIS_GATE();
 		}
-
-/*
-		if(dbg_in == 'a')
-		{
-//			LED_ON();
-			EN_GATE();
-		}
-
-		if(dbg_in == 's')
-		{
-//			LED_OFF();
-			DIS_GATE();
-			freq = MIN_FREQ;
-			sin_mult = 40;
-		}
-
-		if(dbg_in == 'q') new_mult=10;
-		if(dbg_in == 'w') new_mult=14;
-		if(dbg_in == 'e') new_mult=20;
-		if(dbg_in == 'r') new_mult=28;
-		if(dbg_in == 't') new_mult=40;
-		if(dbg_in == 'y') new_mult=56;
-		if(dbg_in == 'u') new_mult=80;
-		if(dbg_in == 'i') new_mult=110;
-		if(dbg_in == 'o') new_mult=160;
-		if(dbg_in == 'p') new_mult=220;
-
-		int mult = sin_mult;
-		if(mult < new_mult) mult++;
-		else if(mult > new_mult) mult--;
-		sin_mult = mult;
-
-		if(dbg_in == '1') hall_aim=0*65536;
-		if(dbg_in == '2') hall_aim=1000*65536;
-		if(dbg_in == '3') hall_aim=2000*65536;
-		if(dbg_in == '4') hall_aim=3000*65536;
-		if(dbg_in == '5') hall_aim=4000*65536;
-		if(dbg_in == '6') hall_aim=5000*65536;
-		if(dbg_in == '7') hall_aim=6000*65536;
-		if(dbg_in == '8') hall_aim=7000*65536;
-		if(dbg_in == '9') hall_aim=8000*65536;
-		if(dbg_in == '0') hall_aim=9000*65536;
-		if(dbg_in == '+') hall_aim=10000*65536;
-
-		if(dbg_in == 'Z') set_curr_lim(2000);
-		if(dbg_in == 'X') set_curr_lim(4000);
-		if(dbg_in == 'C') set_curr_lim(8000);
-		if(dbg_in == 'V') set_curr_lim(16000);
-
-		if(dbg_in == 'B') run_dccal();
-
-		if(dbg_in == 'R') reverse = 1;
-		if(dbg_in == 'F') reverse = 0;
-
-//		dbg = (freq&0xffff0000)>>16;
-
-//		dbg = 0;
-//		if(HALL_A()) dbg |= 1;
-//		if(HALL_B()) dbg |= 2;
-//		if(HALL_C()) dbg |= 4;
-
-//		if(ADC1->ISR & 2)
-//			LED_ON();
-*/
-
 	}
 
 

@@ -212,11 +212,10 @@ Give clock: data is returned (no status codes)
 void flasher() __attribute__((section(".flasher")));
 void flasher()
 {
-	int kakka = 0;
 	int i;
 	uint16_t size;
 
-	LED_OFF();
+	LED_ON();
 
 	while(1)
 	{
@@ -229,19 +228,17 @@ void flasher()
 			case 100:
 			if(arg < 1 || arg > 30)
 			{
-				LED_ON(); while(1);
+				{while(1) { delay_ms(50); LED_ON(); delay_ms(50); LED_OFF(); }}			
 			}
 			unlock_flash();
 			for(i=0; i < arg; i++)
 			{
 				erase_page(FLASH_OFFSET + i*1024);
-//				delay_ms(1);
 			}
 
 			lock_flash();
 			spi1_poll_tx(0xaaaa);
 			spi1_empty_rx();
-			kakka = 1;
 			break;
 
 			case 101:
@@ -249,13 +246,12 @@ void flasher()
 			size = spi1_poll_rx();
 			if(size < 50 || size > 30*1024)
 			{
-				LED_ON(); while(1);
+				{while(1) { delay_ms(50); LED_ON(); delay_ms(50); LED_OFF(); }}			
 			}
 			unlock_flash();
 			spi_flash_program(size);
 			spi1_empty_rx();
 			lock_flash();
-//			if(1) {while(1) { delay_ms(50); LED_ON(); delay_ms(50); LED_OFF(); }}
 			break;
 
 			case 102:
@@ -263,7 +259,7 @@ void flasher()
 			size = spi1_poll_rx();
 			if(size < 50 || size > 30*1024)
 			{
-				LED_ON(); while(1);
+				{while(1) { delay_ms(50); LED_ON(); delay_ms(50); LED_OFF(); }}			
 			}
 			spi_flash_read(size);
 			spi1_empty_rx();
@@ -271,6 +267,7 @@ void flasher()
 
 			case 150:
 			case 151:
+			LED_OFF();
 			NVIC_SystemReset();
 			while(1);
 
