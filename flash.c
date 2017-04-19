@@ -22,6 +22,7 @@ extern unsigned int _SETTINGSI_BEGIN;
 #define LED_OFF() {GPIOF->BSRR = 1UL<<16;}
 
 // Blocks until free space in the SPI TX FIFO
+void spi1_poll_tx(uint16_t d) __attribute__((section(".flasher")));
 void spi1_poll_tx(uint16_t d)
 {
 	while(!(SPI1->SR & (1UL<<1))) ;
@@ -29,6 +30,7 @@ void spi1_poll_tx(uint16_t d)
 }
 
 // Blocks until data available in SPI RX FIFO - so indefinitely unless you have issued a TX just before.
+uint16_t spi1_poll_rx() __attribute__((section(".flasher")));
 uint16_t spi1_poll_rx()
 {
 	while(!(SPI1->SR & (1UL<<0))) ;
@@ -36,13 +38,14 @@ uint16_t spi1_poll_rx()
 }
 
 // Empties the rx fifo
+void spi1_empty_rx() __attribute__((section(".flasher")));
 void spi1_empty_rx()
 {
 	while(SPI1->SR&(0b11<<9)) SPI1->DR;
 }
 
-extern void delay_ms(uint32_t i) __attribute__((section(".flasher")));;
-extern void delay_us(uint32_t i) __attribute__((section(".flasher")));;
+extern void delay_ms(uint32_t i) __attribute__((section(".flasher")));
+extern void delay_us(uint32_t i) __attribute__((section(".flasher")));
 
 void unlock_flash() __attribute__((section(".flasher")));
 void unlock_flash()
@@ -209,6 +212,7 @@ Give clock: data is returned (no status codes)
 void flasher() __attribute__((section(".flasher")));
 void flasher()
 {
+	int kakka = 0;
 	int i;
 	uint16_t size;
 
@@ -230,12 +234,14 @@ void flasher()
 			unlock_flash();
 			for(i=0; i < arg; i++)
 			{
-				erase_page(FLASH_OFFSET + i*1024);	
+				erase_page(FLASH_OFFSET + i*1024);
+//				delay_ms(1);
 			}
 
 			lock_flash();
 			spi1_poll_tx(0xaaaa);
-			spi_empty_rx();
+			spi1_empty_rx();
+			kakka = 1;
 			break;
 
 			case 101:
@@ -247,8 +253,9 @@ void flasher()
 			}
 			unlock_flash();
 			spi_flash_program(size);
-			spi_empty_rx();
+			spi1_empty_rx();
 			lock_flash();
+//			if(1) {while(1) { delay_ms(50); LED_ON(); delay_ms(50); LED_OFF(); }}
 			break;
 
 			case 102:
@@ -259,7 +266,7 @@ void flasher()
 				LED_ON(); while(1);
 			}
 			spi_flash_read(size);
-			spi_empty_rx();
+			spi1_empty_rx();
 			break;
 
 			case 150:

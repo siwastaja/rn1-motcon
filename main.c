@@ -5,6 +5,7 @@
 #include "main.h"
 #include "ext_include/stm32f0xx.h"
 #include "own_std.h"
+#include "flash.h"
 
 #define LED_ON()  {} //{GPIOF->BSRR = 1UL;}
 #define LED_OFF() {GPIOF->BSRR = 1UL<<16;}
@@ -199,8 +200,9 @@ void run_flasher()
 	__disable_irq();
 	// Reconfig SPI to run without interrupts.
 
-	while(SPI1->SR&(0b11<<11)); // Wait for TX fifo empty
-	while(SPI1->SR&(1<<7)) ; // Wait until not busy.
+	// There seems to be no way of emptying the TX fifo, so we'll be happy sending some false data for the first two transactions.
+//	while(SPI1->SR&(0b11<<11)); // Wait for TX fifo empty
+//	while(SPI1->SR&(1<<7)) ; // Wait until not busy.
 
 	SPI1->CR1 = 0; // Disable SPI
 
