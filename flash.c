@@ -21,6 +21,26 @@ extern unsigned int _SETTINGSI_BEGIN;
 #define LED_ON()  {GPIOF->BSRR = 1UL;}
 #define LED_OFF() {GPIOF->BSRR = 1UL<<16;}
 
+// Blocks until free space in the SPI TX FIFO
+void spi1_poll_tx(uint16_t d)
+{
+	while(!(SPI1->SR & (1UL<<1))) ;
+	SPI1->DR = d;
+}
+
+// Blocks until data available in SPI RX FIFO - so indefinitely unless you have issued a TX just before.
+uint16_t spi1_poll_rx()
+{
+	while(!(SPI1->SR & (1UL<<0))) ;
+	return SPI1->DR;
+}
+
+// Empties the rx fifo
+void spi1_empty_rx()
+{
+	while(SPI1->SR&(0b11<<9)) SPI1->DR;
+}
+
 extern void delay_ms(uint32_t i) __attribute__((section(".flasher")));;
 extern void delay_us(uint32_t i) __attribute__((section(".flasher")));;
 
@@ -141,8 +161,8 @@ void spi_flash_program(int size)
 
 	for(i = 0; i < size; i++)
 	{
-		while(!(SPI1->SR & (1UL<<0))) ;
-		*p_flash = (uint16_t)SPI1->DR;
+		*p_flash = spi1_poll_rx();
+		spi1_poll_tx(0x1111);
 		p_flash++;
 		while(FLASH->SR & 1) ; // Poll busy bit
 	}
@@ -160,9 +180,8 @@ void spi_flash_read(int size)
 
 	for(i = 0; i < size; i++)
 	{
-		while(!(SPI1->SR & (1UL<<1))) ;
-
-		SPI1->DR = *p_flash;
+		spi1_poll_tx(*p_flash); // blocks to sync to the rn1-brain uart speed
+		spi1_empty_rx();
 		p_flash++;
 	}
 }
@@ -197,15 +216,10 @@ void flasher()
 
 	while(1)
 	{
-		while(!(SPI1->SR & (1UL<<0))) ;
-		uint16_t datareg = SPI1->DR;
+		uint16_t datareg = spi1_poll_rx();
 		uint8_t cmd = (datareg&0xff00)>>8;
 		uint8_t arg = datareg&0xff;
 
-		if(datareg != 0)
-			LED_ON();
-
-/*
 		switch(cmd)
 		{
 			case 100:
@@ -220,26 +234,32 @@ void flasher()
 			}
 
 			lock_flash();
-			while(!(SPI1->SR & (1UL<<1))) ;
-			SPI1->DR = 0xaaaa;
+			spi1_poll_tx(0xaaaa);
+			spi_empty_rx();
 			break;
 
 			case 101:
-			while(!(SPI1->SR & (1UL<<0))) ;
-			size = SPI1->DR;
+			spi1_poll_tx(0xcccc);
+			size = spi1_poll_rx();
 			if(size < 50 || size > 30*1024)
 			{
 				LED_ON(); while(1);
 			}
 			unlock_flash();
 			spi_flash_program(size);
+			spi_empty_rx();
 			lock_flash();
 			break;
 
 			case 102:
-			while(!(SPI1->SR & (1UL<<0))) ;
-			size = SPI1->DR;
+			spi1_poll_tx(0xcccc); // Master can recognize this and knows the data will follow.
+			size = spi1_poll_rx();
+			if(size < 50 || size > 30*1024)
+			{
+				LED_ON(); while(1);
+			}
 			spi_flash_read(size);
+			spi_empty_rx();
 			break;
 
 			case 150:
@@ -251,6 +271,5 @@ void flasher()
 			break;
 		}
 
-*/
 	}
 }

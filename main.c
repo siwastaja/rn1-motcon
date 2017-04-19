@@ -198,13 +198,22 @@ void run_flasher()
 	DIS_GATE();
 	__disable_irq();
 	// Reconfig SPI to run without interrupts.
+
+	while(SPI1->SR&(0b11<<11)); // Wait for TX fifo empty
+	while(SPI1->SR&(1<<7)) ; // Wait until not busy.
+
 	SPI1->CR1 = 0; // Disable SPI
-	delay_us(10);
+
+	spi1_empty_rx();
+
+	delay_ms(1);
+	// sclk must be at idle before enabling
 	SPI1->CR2 = 0b1111UL<<8 /*16-bit*/;
 	SPI1->CR1 = 1UL<<6; // Enable SPI
 
 	flasher();
 }
+
 
 void spi_inthandler()
 {

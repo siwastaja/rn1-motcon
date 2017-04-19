@@ -22,4 +22,13 @@ extern settings_type settings __attribute__((section(".settings")));
 
 void save_settings();
 
+// Blocks until free space in the SPI TX FIFO
+void spi1_poll_tx(uint16_t d);
+
+// Blocks until data available in SPI RX FIFO - so indefinitely unless you have issued a TX just before.
+uint16_t spi1_poll_rx();
+
+// Empties the rx fifo
+void spi1_empty_rx();
+
 #endif
