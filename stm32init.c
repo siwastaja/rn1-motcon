@@ -57,7 +57,7 @@ unsigned int * the_nvic_vector[48] __attribute__ ((section(".nvic_vector"))) =
 /* 0x0098                    */ (unsigned int *) invalid_handler,
 /* 0x009C                    */ (unsigned int *) invalid_handler,
 /* 0x00A0                    */ (unsigned int *) invalid_handler,
-/* 0x00A4  SPI1              */ (unsigned int *) spi_inthandler,
+/* 0x00A4  SPI1              */ (unsigned int *) invalid_handler,
 /* 0x00A8                    */ (unsigned int *) invalid_handler,
 /* 0x00AC                    */ (unsigned int *) invalid_handler,
 /* 0x00B0                    */ (unsigned int *) invalid_handler,

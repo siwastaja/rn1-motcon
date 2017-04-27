@@ -7,14 +7,23 @@
 #include "own_std.h"
 #include "flash.h"
 
+//#define LEDS_FOR_DEBUG
 
 #define PWM_MID 512
 #define MIN_FREQ 1*65536
 #define MAX_FREQ 100*65536
 
-
+#ifdef LEDS_FOR_DEBUG
+#define LED_ON()  {}
+#define LED_OFF() {}
+#define DLED_ON()  {GPIOF->BSRR = 1UL;}
+#define DLED_OFF() {GPIOF->BSRR = 1UL<<16;}
+#else
 #define LED_ON()  {GPIOF->BSRR = 1UL;}
 #define LED_OFF() {GPIOF->BSRR = 1UL<<16;}
+#define DLED_ON()  {}
+#define DLED_OFF() {}
+#endif
 
 #define EN_GATE()  {GPIOA->BSRR = 1UL<<11;}
 #define DIS_GATE() {GPIOA->BSRR = 1UL<<(11+16);}
@@ -38,11 +47,10 @@ volatile int neg_curr_lim = -20;
 volatile int pos_curr_lim = 20;
 volatile int new_mult=0;
 volatile int timeout = 50;
-volatile int reverse;
-volatile int do_resync = 10;
+//volatile int do_resync = 10;
 volatile uint32_t freq = MIN_FREQ;
 
-typedef struct
+typedef struct __attribute__ ((packed))
 {
 	int16_t cur_c;
 	int16_t cur_b;
@@ -50,11 +58,48 @@ typedef struct
 
 #define NUM_ADC_SAMPLES 2
 
-adc_data_t latest_adc[2];
+volatile adc_data_t latest_adc[2];
 int16_t dccal_c;
 int16_t dccal_b;
 
-volatile uint8_t sin_mult;
+#define SPI_DATAGRAM_LEN 8
+typedef union 
+{
+	struct __attribute__ ((packed))
+	{
+		uint16_t status;
+		int16_t speed;
+		int16_t current;
+		int16_t pos;
+		uint16_t res4;
+		uint16_t res5;
+		uint16_t res6;
+		uint16_t magic;
+	};
+	uint16_t u16[8];
+	int16_t s16[8];
+} spi_tx_t;
+
+typedef union
+{
+	struct __attribute__ ((packed))
+	{
+		uint16_t state;
+		int16_t speed;
+		int16_t cur_limit;
+		uint16_t res3;
+		uint16_t res4;
+		uint16_t res5;
+		uint16_t res6;
+		uint16_t magic;
+	};
+	uint16_t u16[8];
+	int16_t s16[8];
+} spi_rx_t;
+
+volatile spi_tx_t spi_tx_data;
+volatile spi_rx_t spi_rx_data;
+
 volatile int latest_current;
 volatile uint16_t lost_count, minfreq_count;
 volatile uint32_t sine_loc = 0;
@@ -72,32 +117,44 @@ volatile int led_short = 0;
 */
 const int hall_loc[8] =
 {
- 0, // 000  ERROR
+ -1, // 000  ERROR
  1, // 001
  3, // 010
  2, // 011
  5, // 100
  0, // 101  Middle hall active - we'll call this zero position
  4, // 110
- 0  // 111  ERROR
+ -1  // 111  ERROR
 };
 
-#define PHSHIFT (1431655765UL)  // 120 deg shift between the phases in the 32-bit range.
+#define PH120SHIFT (1431655765UL)  // 120 deg shift between the phases in the 32-bit range.
+#define PH90SHIFT (1073741824UL)   // 90 deg shift between the phases in the 32-bit range.
+#define PH45SHIFT (PH90SHIFT/2)
 
 const int base_hall_aims[6] =
 {
 	0,
-	PHSHIFT/2,
-	PHSHIFT,
-	PHSHIFT+PHSHIFT/2,
-	PHSHIFT*2,
-	PHSHIFT*2+PHSHIFT/2
+	PH120SHIFT/2,
+	PH120SHIFT,
+	PH120SHIFT+PH120SHIFT/2,
+	PH120SHIFT*2,
+	PH120SHIFT*2+PH120SHIFT/2
 };
 
 
+/*const int base_hall_aims[6] =
+{
+	PH120SHIFT,
+	PH120SHIFT+PH120SHIFT/2,
+	PH120SHIFT*2,
+	PH120SHIFT*2+PH120SHIFT/2,
+	0,
+	PH120SHIFT/2
+};*/
+
 
 #define HALL_LOC() (hall_loc[HALL_ABC()])
-#define HALL_AIM(l) (base_hall_aims[(l)] + timing_shift)
+#define HALL_AIM(l) (base_hall_aims[(l)] + timing_shift + (reverse?(-PH45SHIFT):(PH45SHIFT)))
 
 /*
 The sine table is indexed with 8 MSBs of uint32; this way, a huge resolution is implemented for the frequency,
@@ -214,11 +271,10 @@ void set_curr_lim(int ma)
 void forward(uint16_t speed)
 {
 	EN_GATE();
-	timeout = 50;
+	timeout = 200;
 	if(speed > 400)
 		speed = 400;
 
-	reverse = 0;
 	if(bldc)
 	{
 		new_mult = speed>>1;
@@ -233,14 +289,13 @@ void forward(uint16_t speed)
 void backward(uint16_t speed)
 {
 	EN_GATE();
-	timeout = 50;
+	timeout = 200;
 	if(speed > 400)
 		speed = 400;
 
-	reverse = 1;
 	if(bldc)
 	{
-		new_mult = speed>>1;
+		new_mult = -1*(int)(speed>>1);
 	}
 	else
 	{
@@ -255,10 +310,14 @@ void run_flasher()
 {
 	DIS_GATE();
 	__disable_irq();
+	DMA1_Channel3->CCR = 0;
+	DMA1_Channel2->CCR = 0;
+
 	// Reconfig SPI to run without interrupts.
 	// There seems to be no way of emptying the TX fifo, so we'll be happy sending some false data for the first two transactions.
 
 	SPI1->CR1 = 0; // Disable SPI
+	SPI1->CR2 = 0;
 
 	spi1_empty_rx();
 
@@ -268,68 +327,6 @@ void run_flasher()
 	SPI1->CR1 = 1UL<<6; // Enable SPI
 
 	flasher();
-}
-
-void spi_inthandler()
-{
-	static int flasher_sequence = 0;
-	static int send_cnt = 1;
-	uint16_t msg = SPI1->DR;
-	uint16_t cmd = (msg&(0b111111<<10)) >> 10;
-	uint16_t param = msg&0x3FF;
-
-	if(flasher_sequence) flasher_sequence--;
-
-	switch(cmd)
-	{
-		case 11:
-		forward(param);
-		break;
-
-		case 12:
-		backward(param);
-		break;
-
-		case 13:
-		timing_shift += 50*65536;
-
-		case 14:
-		timing_shift -= 50*65536;
-
-		case 60:
-		if(param == 234 && flasher_sequence == 0)
-			flasher_sequence=2;
-		break;
-
-		case 55:
-		if(param == 345 && flasher_sequence)
-			run_flasher();
-		break;
-
-		default:
-		break;
-	}
-	// Write some new stuff for the next round.
-
-	uint16_t data_out = 0;
-	switch(send_cnt)
-	{
-		case 1:
-		data_out = latest_current&0x3FF;
-		break;
-		case 2:
-		data_out = (freq>>15)&0x3FF;
-		break;
-		default:
-		break;
-	}
-
-//	SPI1->DR = send_cnt<<10 | data_out;
-	SPI1->DR = timing_shift>>16;
-	send_cnt++;
-	if(send_cnt > 2)
-		send_cnt = 1;
-
 }
 
 void run_dccal()
@@ -356,8 +353,13 @@ void run_dccal()
 	good resolution of the fundamental frequency.
 */
 
+int floop_pi_term = 12;
+int floop_d_term = 128;
+
 void tim1_inthandler()
 {
+	static int reverse = 0;
+	static int mult = 0;
 	static int currlim_mult = 255;
 	static int cnt = 0;
 	static int expected_next_hall_pos;
@@ -366,15 +368,23 @@ void tim1_inthandler()
 	static int cnt_at_prev_hall_valid = 0;
 	static int cnt_at_prev_hall;
 	static int prev_hall_pos;
+	static int resync = 5;
+	static int16_t pos_info;
+	static int prev_ferr = 0;
+	static int measured_f = 0;
+	static int measured_f_at_cnt = 0;
 
+//	static int accel_dir = 0;
+
+	DLED_ON();
 	TIM1->SR = 0; // Clear interrupt flags
 
-	int hall_pos = HALL_LOC();
+	int hall_pos = hall_loc[HALL_ABC()];
+	if(hall_pos == -1) hall_pos = prev_hall_pos;
 
 	uint32_t loc = sine_loc;
 	int f = freq;
 
-	int resync = do_resync;
 
 	if(!resync && hall_pos == prev_hall_pos) 
 	{
@@ -389,6 +399,7 @@ void tim1_inthandler()
 		}
 		
 		if(!reverse) loc += f; else loc -= f;
+//		loc -= (accel_dir*f)>>2;
 
 	}
 	else if(!resync && hall_pos == expected_next_hall_pos) 
@@ -399,13 +410,15 @@ void tim1_inthandler()
 
 		if(cnt_at_prev_hall_valid)
 		{
-			f = (PHSHIFT)/((cnt-cnt_at_prev_hall));
+			f = (PH120SHIFT)/((cnt-cnt_at_prev_hall));
+			measured_f = (reverse?(-1*f):(f))>>4;
+			measured_f_at_cnt = cnt;
 			expected_next_hall_cnt =  cnt+(cnt-cnt_at_prev_hall);
 			expected_next_hall_cnt_valid = 1;
 		}
 		else
 		{
-			// if we cannot determine the frequency, we use an absolute minimal frequency we'll ever want to use;
+			// if we cannot determine the frequency, we use the absolute minimal frequency we'll ever want to use;
 			// that's slightly better than doing completely without interpolation	
 			minfreq_count++;
 			f = MIN_FREQ; 
@@ -424,8 +437,19 @@ void tim1_inthandler()
 		f = MIN_FREQ;
 	}
 
+	if(cnt - measured_f_at_cnt > 8000)
+	{
+		if(measured_f > 0) measured_f--;
+		else if(measured_f < 0) measured_f++;
+	}
+
 	if(resync) resync--;
-	do_resync = resync;
+
+	if(hall_pos == expected_next_hall_pos)
+	{
+		if(reverse) pos_info--; else pos_info++;
+		spi_tx_data.pos = pos_info;
+	}
 
 	prev_hall_pos = hall_pos;
 	expected_next_hall_pos = hall_pos;
@@ -433,14 +457,48 @@ void tim1_inthandler()
 	else         { expected_next_hall_pos--; if(expected_next_hall_pos < 0) expected_next_hall_pos = 5; }
 
 	int idxa = ((loc)&0xff000000)>>24;
-	int idxb = ((loc+PHSHIFT)&0xff000000)>>24;
-	int idxc = ((loc+2*PHSHIFT)&0xff000000)>>24;
+	int idxb = ((loc+PH120SHIFT)&0xff000000)>>24;
+	int idxc = ((loc+2*PH120SHIFT)&0xff000000)>>24;
 
+	spi_tx_data.speed = measured_f>>8;
 
-	uint8_t mult = ((uint16_t)sin_mult * (uint16_t)currlim_mult)>>8; // 254 max
-	TIM1->CCR1 = (PWM_MID) + ((mult*sine[idxa])>>14); // 4 to 1019. 
-	TIM1->CCR2 = (PWM_MID) + ((mult*sine[idxb])>>14);
-	TIM1->CCR3 = (PWM_MID) + ((mult*sine[idxc])>>14);
+	int fsetpoint = spi_rx_data.speed<<8; // 24-bit range
+
+	int ferr;
+
+	ferr = fsetpoint - measured_f;
+
+	spi_tx_data.res4 = fsetpoint>>8;
+	spi_tx_data.res5 = ferr>>8;
+
+	if(!(cnt & 31))
+	{
+//		int dferr = (ferr - prev_ferr)>>8;
+//		prev_ferr = ferr;
+
+		mult += (ferr>>12);// - dferr;
+
+	}
+
+	spi_tx_data.res6 = mult;
+	
+	int max_mult = 100*256;
+	int min_mult = -100*256;
+
+	if(mult > max_mult) mult = max_mult;
+	if(mult < min_mult) mult = min_mult;
+	if(mult > -5*256 && mult < 5*256) resync = 5;
+
+	int sin_mult = mult>>8;
+//	spi_tx_data.res4 = sin_mult;
+//	spi_tx_data.res5 = lost_count; 
+//	spi_tx_data.res6 = minfreq_count; 
+	if(sin_mult < 0) {reverse = 1; sin_mult *= -1;} else {reverse = 0;}
+
+	uint8_t m = (sin_mult * currlim_mult)>>8; // 254 max
+	TIM1->CCR1 = (PWM_MID) + ((m*sine[idxa])>>14); // 4 to 1019. 
+	TIM1->CCR2 = (PWM_MID) + ((m*sine[idxb])>>14);
+	TIM1->CCR3 = (PWM_MID) + ((m*sine[idxc])>>14);
 
 	cnt++;
 
@@ -453,12 +511,12 @@ void tim1_inthandler()
 
 	if(OVERCURR())
 	{
-		LED_ON(); led_short = 0;
+//		LED_ON(); led_short = 0;
 		currlim_mult-=50;
 	}
 	else if(current < neg_curr_lim || current > pos_curr_lim)
 	{
-		LED_ON(); led_short = 1;
+//		LED_ON(); led_short = 1;
 		currlim_mult-=2;
 	}
 	else if(currlim_mult < 255)
@@ -466,12 +524,16 @@ void tim1_inthandler()
 
 	if(currlim_mult < 5) currlim_mult = 5;
 
+
+
+
 //	dbg = current;
 
 //	int vasen = latest_adc[0].cur_b-512;
 //	int oikea = latest_adc[1].cur_b-512;
 
 //	dbg = ((int8_t)(vasen>>2))<<8 | (int8_t)(oikea>>2);
+	DLED_OFF();
 }
 
 int main()
@@ -553,14 +615,34 @@ int main()
 	set_prot_lim(5000);
 	DAC->CR |= 1; // enable, defaults good otherwise.
 
-	SPI1->CR2 = 0b1111UL<<8 /*16-bit*/ | 1UL<<6 /*RX buffer not empty interrupt*/;
+	// DMA: channel 3 for SPI TX.
+	DMA1_Channel3->CPAR = (uint32_t)&(SPI1->DR);
+	DMA1_Channel3->CMAR = (uint32_t)(&spi_tx_data);
+	DMA1_Channel3->CNDTR = SPI_DATAGRAM_LEN;
+	DMA1_Channel3->CCR = 0b10<<12 /*hi prio*/ | 0b01<<10 /*16-bit mem*/ | 0b01<<8 /*16-bit periph*/ | 1<<7 /* mem increment*/ |
+	                     1<<5 /*circular*/ | 1<<4 /*dir: mem->spi*/;
+
+	// DMA: channel 2 for SPI RX
+	DMA1_Channel2->CPAR = (uint32_t)&(SPI1->DR);
+	DMA1_Channel2->CMAR = (uint32_t)(&spi_rx_data);
+	DMA1_Channel2->CNDTR = SPI_DATAGRAM_LEN;
+	DMA1_Channel2->CCR = 0b10<<12 /*hi prio*/ | 0b01<<10 /*16-bit mem*/ | 0b01<<8 /*16-bit periph*/ | 1<<7 /* mem increment*/ |
+	                     1<<5 /*circular*/ | 0<<4 /*dir: spi->mem*/;
+
+	delay_ms(100); // let the main cpu boot, so that nCS is definitely up.
+
+	DMA1_Channel3->CCR |= 1; // enable
+	DMA1_Channel2->CCR |= 1; // enable
+
+	SPI1->CR2 = 0b1111UL<<8 /*16-bit*/ | 1UL<<1 /* TX DMA enable */ | 1UL<<0 /* RX DMA enable*/;
 	SPI1->CR1 = 1UL<<6; // Enable SPI - zeroes good otherwise.
 
-	// Enable DMA: channel 1 for ADC.
+
+	// DMA: channel 1 for ADC.
 	DMA1_Channel1->CPAR = (uint32_t)&(ADC1->DR);
 	DMA1_Channel1->CMAR = (uint32_t)(latest_adc);
 	DMA1_Channel1->CNDTR = 2*NUM_ADC_SAMPLES;
-	DMA1_Channel1->CCR = 0b011010110101000UL; // very high prio, 16b->16b, MemIncrement, circular, transfer error interrupt, enable.
+	DMA1_Channel1->CCR = 0b011010110101000UL; // very high prio, 16b->16b, MemIncrement, circular, transfer error interrupt
 
 	// Enable and self-calibrate ADC.
 	ADC1->CFGR2 = 0b10UL << 30; // PCLK/4, 12 MHz clock
@@ -609,17 +691,47 @@ int main()
 
 		delay_ms(1);
 
-		int mult = sin_mult;
-		if(mult < new_mult) mult++;
-		else if(mult > new_mult) mult--;
-		sin_mult = mult;
+		if(	spi_rx_data.u16[0] == 0xfaaa &&
+			spi_rx_data.u16[1] == 0x1234 &&
+			spi_rx_data.u16[2] == 0xabcd &&
+			spi_rx_data.u16[3] == 0x420b &&
+			spi_rx_data.u16[4] == 0xacdc &&
+			spi_rx_data.u16[5] == 0xabba &&
+			spi_rx_data.u16[6] == 0x1337 &&
+			spi_rx_data.u16[7] == 0xacab)
+		{
+			run_flasher();
+		}
+
+
+		switch(spi_rx_data.state & 0b111)
+		{
+			case 0:
+			case 1:
+			DIS_GATE();
+			break;
+
+			case 2:
+			case 3:
+			case 4:
+			case 5:
+			EN_GATE();
+			break;
+
+
+			default: break;
+		}
+
+
+//		floop_pi_term = spi_rx_data.res3&0xff;
+//		floop_d_term = (spi_rx_data.res3&0xff00)>>8;
 
 		if(timeout) timeout--;
 		else
 		{
 			new_mult = 0;
-			sin_mult = 0;
-			DIS_GATE();
+//			DIS_GATE();
+
 		}
 	}
 

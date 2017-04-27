@@ -36,3 +36,47 @@ There are no headers, so all 16 bits can be utilized.
 
 Data frame:
 
+brain -> motcon
+uint16	state
+	bit15	must always be written 0
+	bit0..2 mode
+	0 = sleep (least power) (not implemented yet)
+	1 = disable drive. Robot can freewheel.
+	2 = short brake.
+	3 = DC brake low level
+	4 = DC brake high level
+	5 = Drive enabled
+	6 = Reserved
+	7 = Reserved
+int16	max speed
+int16	max torque
+int16	res
+int16	res
+int16	res
+int16	res
+uint16	CRC (to be done later)
+
+motcon -> brain
+uint16	status
+	bit0	drive enabled
+int16	speed
+int16	current
+int16	position (free-running count)
+int16	res
+int16	res
+int16	res
+uint16	CRC (to be done later)
+
+
+brain -> motcon
+special data frame for entering flasher:
+0xfaaa
+0x1234
+0xabcd
+0x420b
+0xacdc
+0xabba
+0x1337
+0xacab
+SPI is reconfigured with separate flasher protocol.
+
