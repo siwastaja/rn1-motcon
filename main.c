@@ -48,7 +48,6 @@ volatile int pos_curr_lim = 20;
 volatile int new_mult=0;
 volatile int timeout = 50;
 //volatile int do_resync = 10;
-volatile uint32_t freq = MIN_FREQ;
 
 typedef struct __attribute__ ((packed))
 {
@@ -102,7 +101,6 @@ volatile spi_rx_t spi_rx_data;
 
 volatile int latest_current;
 volatile uint16_t lost_count, minfreq_count;
-volatile uint32_t sine_loc = 0;
 
 
 volatile int d_shift = 13;
@@ -154,7 +152,6 @@ const int base_hall_aims[6] =
 
 
 #define HALL_LOC() (hall_loc[HALL_ABC()])
-#define HALL_AIM(l) (base_hall_aims[(l)] + timing_shift + (reverse?(-PH45SHIFT):(PH45SHIFT)))
 
 /*
 The sine table is indexed with 8 MSBs of uint32; this way, a huge resolution is implemented for the frequency,
@@ -359,70 +356,85 @@ int floop_d_term = 128;
 void tim1_inthandler()
 {
 	static int reverse = 0;
+	static int prev_reverse = 1;
 	static int mult = 0;
 	static int currlim_mult = 255;
-	static int cnt = 0;
+	static int32_t cnt = 0;
 	static int expected_next_hall_pos;
-	static int expected_next_hall_cnt;
-	static int expected_next_hall_cnt_valid = 0;
+	static int32_t expected_next_hall_cnt;
 	static int cnt_at_prev_hall_valid = 0;
 	static int cnt_at_prev_hall;
 	static int prev_hall_pos;
 	static int resync = 5;
 	static int16_t pos_info;
 	static int prev_ferr = 0;
-	static int measured_f = 0;
-	static int measured_f_at_cnt = 0;
+	static int f = 0;
+	static int loc;
+	static int pid_f_set;
+	static int64_t pid_integral = 0;
 
 //	static int accel_dir = 0;
 
 	DLED_ON();
 	TIM1->SR = 0; // Clear interrupt flags
 
+	spi_tx_data.magic = HALL_ABC();
+
 	int hall_pos = hall_loc[HALL_ABC()];
 	if(hall_pos == -1) hall_pos = prev_hall_pos;
 
-	uint32_t loc = sine_loc;
-	int f = freq;
-
-
-	if(!resync && hall_pos == prev_hall_pos) 
+	if(pid_f_set < 0 ) reverse = 1; else reverse = 0;
+	if(reverse != prev_reverse)
 	{
-		// We haven't advanced a step yet, do sine interpolation
-
-		if(expected_next_hall_cnt_valid && cnt > expected_next_hall_cnt)
-		{
-			// Sine interpolation has advanced to the next hall sync point, but we haven't
-			// received the sync yet. Freeze the sine generation.
-			f = 0;
-			expected_next_hall_cnt_valid = 0;
-		}
-		
-		if(!reverse) loc += f; else loc -= f;
-//		loc -= (accel_dir*f)>>2;
-
+		resync = 2;
+		f = 0;
+		pid_integral = 0;
 	}
-	else if(!resync && hall_pos == expected_next_hall_pos) 
+	prev_reverse = reverse;
+
+
+	if(resync)
 	{
-		// We have advanced one step in the right direction - we can synchronize the sine phase, 
+		loc = (base_hall_aims[hall_pos] + timing_shift + (reverse?(-PH90SHIFT):(PH90SHIFT)));
+		cnt_at_prev_hall_valid = 0;
+		expected_next_hall_cnt = cnt+22000;
+		f = 0;
+	}
+	else if(cnt_at_prev_hall_valid && hall_pos == prev_hall_pos) // We haven't advanced a step yet, do sine interpolation
+	{
+		loc = (base_hall_aims[hall_pos] + timing_shift + (reverse?(-PH90SHIFT):(PH90SHIFT)));
+		// Interpolation freezes if the hall sync is not received on time.
+		if((cnt - expected_next_hall_cnt) < 0) // this comparison works with counter wrapping around.
+		{
+			// Sine interpolation hasn't advanced to the next hall sync point, run it
+//			if(reverse)
+//				loc -= f;
+//			else
+//				loc += f;
+		}
+		else // We are overdue: recalculate the freq.
+		{
+			f = (PH120SHIFT)  /  ((cnt-cnt_at_prev_hall));
+		}
+
+		// TODO: prev_error feedforward to frequency generation.
+	}
+	else if(hall_pos == expected_next_hall_pos) 
+	{
+		// We have advanced one step in the right dirction - we can synchronize the sine phase, 
 		// and calculate a valid frequency from the delta time.
-		loc = HALL_AIM(hall_pos);
+		loc = (base_hall_aims[hall_pos] + timing_shift + (reverse?(-PH90SHIFT):(PH90SHIFT)));
 
 		if(cnt_at_prev_hall_valid)
 		{
-			f = (PH120SHIFT)/((cnt-cnt_at_prev_hall));
-			measured_f = (reverse?(-1*f):(f))>>4;
-			measured_f_at_cnt = cnt;
-			expected_next_hall_cnt =  cnt+(cnt-cnt_at_prev_hall);
-			expected_next_hall_cnt_valid = 1;
+//			f = (reverse?(-PH120SHIFT):(PH120SHIFT))  /  ((cnt-cnt_at_prev_hall));
+			f = (PH120SHIFT)  /  ((cnt-cnt_at_prev_hall));
+			expected_next_hall_cnt = cnt+(cnt-cnt_at_prev_hall);
 		}
 		else
 		{
-			// if we cannot determine the frequency, we use the absolute minimal frequency we'll ever want to use;
-			// that's slightly better than doing completely without interpolation	
-			minfreq_count++;
-			f = MIN_FREQ; 
-			expected_next_hall_cnt_valid = 0;
+			f = 0;
+			expected_next_hall_cnt = cnt+22000; // at smallest possible freq, we'll wait for 0.5 sec for the next hall pulse.
 		}
 
 		cnt_at_prev_hall_valid = 1;
@@ -431,16 +443,10 @@ void tim1_inthandler()
 	else // We are lost - synchronize the phase to the current hall status
 	{
 		lost_count++;
-		loc = HALL_AIM(hall_pos);
+		loc = (base_hall_aims[hall_pos] + timing_shift + (reverse?(-PH90SHIFT):(PH90SHIFT)));
 		cnt_at_prev_hall_valid = 0;
-		expected_next_hall_cnt_valid = 0;
-		f = MIN_FREQ;
-	}
-
-	if(cnt - measured_f_at_cnt > 8000)
-	{
-		if(measured_f > 0) measured_f--;
-		else if(measured_f < 0) measured_f++;
+		expected_next_hall_cnt = cnt+22000;
+		f = 0;
 	}
 
 	if(resync) resync--;
@@ -452,48 +458,80 @@ void tim1_inthandler()
 	}
 
 	prev_hall_pos = hall_pos;
+
 	expected_next_hall_pos = hall_pos;
 	if(!reverse) { expected_next_hall_pos++; if(expected_next_hall_pos > 5) expected_next_hall_pos = 0; }
 	else         { expected_next_hall_pos--; if(expected_next_hall_pos < 0) expected_next_hall_pos = 5; }
 
-	int idxa = ((loc)&0xff000000)>>24;
-	int idxb = ((loc+PH120SHIFT)&0xff000000)>>24;
-	int idxc = ((loc+2*PH120SHIFT)&0xff000000)>>24;
 
-	spi_tx_data.speed = measured_f>>8;
+	int idxa = (((uint32_t)loc)&0xff000000)>>24;
+	int idxb = (((uint32_t)loc+PH120SHIFT)&0xff000000)>>24;
+	int idxc = (((uint32_t)loc+2*PH120SHIFT)&0xff000000)>>24;
 
-	int fsetpoint = spi_rx_data.speed<<8; // 24-bit range
+	// Ramp the setpoint.
+	int next_pid_f_set = (spi_rx_data.speed*100);
+
+	if(next_pid_f_set > pid_f_set) pid_f_set+=256;
+	else if(next_pid_f_set < pid_f_set) pid_f_set-=256;
+	if((next_pid_f_set - pid_f_set) > -256 && (next_pid_f_set - pid_f_set) < 256) next_pid_f_set = pid_f_set;
+
+	int pid_f_meas = f>>3;
+	if(reverse) pid_f_meas *= -1;
 
 	int ferr;
 
-	ferr = fsetpoint - measured_f;
+	ferr = pid_f_set - pid_f_meas;
 
-	spi_tx_data.res4 = fsetpoint>>8;
+	spi_tx_data.speed = pid_f_meas>>8;
+	spi_tx_data.res4 = pid_f_set>>8;
 	spi_tx_data.res5 = ferr>>8;
 
-	if(!(cnt & 31))
-	{
-//		int dferr = (ferr - prev_ferr)>>8;
-//		prev_ferr = ferr;
 
-		mult += (ferr>>12);// - dferr;
+#define PID_I_MAX 2000000000LL
+#define PID_I_MIN -PID_I_MAX
+
+	if(!(cnt & 15))
+	{
+
+	
+		int dferr = (ferr - prev_ferr);
+		prev_ferr = ferr;
+
+		pid_integral += ferr;
+
+		if(pid_integral > (PID_I_MAX)) pid_integral = PID_I_MAX;
+		else if(pid_integral < (PID_I_MIN)) pid_integral = PID_I_MIN;
+
+		mult = ((30*(int64_t)pid_f_set)>>10) /* feedforward */
+			+ ((50*(int64_t)ferr)>>12) /* P */
+			+ ((50*(int64_t)pid_integral)>>19)  /* I */
+			+ ((50*(int64_t)dferr)>>12);
 
 	}
 
 	spi_tx_data.res6 = mult;
 	
-	int max_mult = 100*256;
-	int min_mult = -100*256;
+	int max_mult = 150*256;
+	int min_mult = -150*256;
 
 	if(mult > max_mult) mult = max_mult;
 	if(mult < min_mult) mult = min_mult;
-	if(mult > -5*256 && mult < 5*256) resync = 5;
+//	if(mult > -2*256 && mult < 2*256) resync = 5;
 
 	int sin_mult = mult>>8;
 //	spi_tx_data.res4 = sin_mult;
 //	spi_tx_data.res5 = lost_count; 
 //	spi_tx_data.res6 = minfreq_count; 
-	if(sin_mult < 0) {reverse = 1; sin_mult *= -1;} else {reverse = 0;}
+
+	if(reverse) sin_mult *= -1;	
+
+	if(sin_mult < 0) sin_mult = 0;
+
+#define MIN_MULT_OFFSET 9
+	if(sin_mult != 0)
+		sin_mult += MIN_MULT_OFFSET;
+
+//	spi_tx_data.magic = lost_count; //sin_mult;
 
 	uint8_t m = (sin_mult * currlim_mult)>>8; // 254 max
 	TIM1->CCR1 = (PWM_MID) + ((m*sine[idxa])>>14); // 4 to 1019. 
@@ -501,9 +539,6 @@ void tim1_inthandler()
 	TIM1->CCR3 = (PWM_MID) + ((m*sine[idxc])>>14);
 
 	cnt++;
-
-	sine_loc = loc;
-	freq = f;
 
 	int current = latest_adc[1].cur_b-dccal_b; // Temporary solution, adc timing must be improved
 
@@ -722,6 +757,8 @@ int main()
 			default: break;
 		}
 
+//		timing_shift = spi_rx_data.s16[7]<<16;
+//		spi_tx_data.s16[7] = timing_shift>>16;
 
 //		floop_pi_term = spi_rx_data.res3&0xff;
 //		floop_d_term = (spi_rx_data.res3&0xff00)>>8;
