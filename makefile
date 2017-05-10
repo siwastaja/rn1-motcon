@@ -44,7 +44,7 @@ f3: main.bin
 	sudo ../rn1-tools/mcprog /dev/ttyUSB0 ./main.bin 3
 
 ff: main.bin
-	scp main.bin hrst@proto4:~/mc.bin
+	scp main.bin hrst@proto4:~/rn1-tools/motcon.bin
 
 stack:
 	cat *.su

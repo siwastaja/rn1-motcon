@@ -361,6 +361,8 @@ void tim1_inthandler()
 	static int currlim_mult = 255;
 	static int32_t cnt = 0;
 	static int expected_next_hall_pos;
+	static int expected_fwd_hall_pos;  // for step counting only
+	static int expected_back_hall_pos; // for step counting only
 	static int32_t expected_next_hall_cnt;
 	static int cnt_at_prev_hall_valid = 0;
 	static int cnt_at_prev_hall;
@@ -451,11 +453,17 @@ void tim1_inthandler()
 
 	if(resync) resync--;
 
-	if(hall_pos == expected_next_hall_pos)
+	if(hall_pos == expected_fwd_hall_pos)
 	{
-		if(reverse) pos_info--; else pos_info++;
+		pos_info++;
 		spi_tx_data.pos = pos_info;
 	}
+	else if(hall_pos == expected_back_hall_pos)
+	{
+		pos_info--;
+		spi_tx_data.pos = pos_info;
+	}
+
 
 	prev_hall_pos = hall_pos;
 
@@ -463,6 +471,8 @@ void tim1_inthandler()
 	if(!reverse) { expected_next_hall_pos++; if(expected_next_hall_pos > 5) expected_next_hall_pos = 0; }
 	else         { expected_next_hall_pos--; if(expected_next_hall_pos < 0) expected_next_hall_pos = 5; }
 
+	expected_fwd_hall_pos  = hall_pos+1; if(expected_fwd_hall_pos > 5) expected_fwd_hall_pos = 0;
+	expected_back_hall_pos = hall_pos-1; if(expected_back_hall_pos < 0) expected_back_hall_pos = 5;
 
 	int idxa = (((uint32_t)loc)&0xff000000)>>24;
 	int idxb = (((uint32_t)loc+PH120SHIFT)&0xff000000)>>24;
@@ -527,7 +537,7 @@ void tim1_inthandler()
 
 	if(sin_mult < 0) sin_mult = 0;
 
-#define MIN_MULT_OFFSET 9
+#define MIN_MULT_OFFSET 10 // was 9
 	if(sin_mult != 0)
 		sin_mult += MIN_MULT_OFFSET;
 
