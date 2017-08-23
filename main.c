@@ -99,7 +99,6 @@ typedef union
 volatile spi_tx_t spi_tx_data;
 volatile spi_rx_t spi_rx_data;
 
-volatile int latest_current;
 volatile uint16_t lost_count, minfreq_count;
 
 
@@ -493,8 +492,8 @@ void tim1_inthandler()
 	ferr = pid_f_set - pid_f_meas;
 
 	spi_tx_data.speed = pid_f_meas>>8;
-	spi_tx_data.res4 = pid_f_set>>8;
-	spi_tx_data.res5 = ferr>>8;
+//	spi_tx_data.res4 = pid_f_set>>8;
+//	spi_tx_data.res5 = ferr>>8;
 
 
 #define PID_I_MAX 2000000000LL
@@ -552,16 +551,18 @@ void tim1_inthandler()
 
 	int current = latest_adc[1].cur_b-dccal_b; // Temporary solution, adc timing must be improved
 
-	latest_current = current;
+	spi_tx_data.current = current;
+	spi_tx_data.res4 = latest_adc[1].cur_b;
+	spi_tx_data.res5 = dccal_b;
 
 	if(OVERCURR())
 	{
-//		LED_ON(); led_short = 0;
+		LED_ON(); led_short = 0;
 		currlim_mult-=50;
 	}
 	else if(current < neg_curr_lim || current > pos_curr_lim)
 	{
-//		LED_ON(); led_short = 1;
+		LED_ON(); led_short = 1;
 		currlim_mult-=2;
 	}
 	else if(currlim_mult < 255)
@@ -708,6 +709,8 @@ int main()
 	NVIC_EnableIRQ(SPI1_IRQn);
 	NVIC_EnableIRQ(TIM1_BRK_UP_TRG_COM_IRQn);
 	__enable_irq();
+
+	LED_ON();
 	EN_GATE();
 	delay_ms(50);
 	run_dccal();
@@ -748,7 +751,6 @@ int main()
 			run_flasher();
 		}
 
-
 		switch(spi_rx_data.state & 0b111)
 		{
 			case 0:
@@ -766,6 +768,11 @@ int main()
 
 			default: break;
 		}
+
+//		static int kakka = 0;
+//		kakka++;
+//		if(kakka == 1000) { EN_GATE(); }
+
 
 //		timing_shift = spi_rx_data.s16[7]<<16;
 //		spi_tx_data.s16[7] = timing_shift>>16;

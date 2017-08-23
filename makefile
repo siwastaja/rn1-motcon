@@ -25,10 +25,10 @@ main.bin: $(OBJ)
 	$(SIZE) main.elf
 
 flash_full: main.bin
-	sudo stm32sprog -d /dev/ttyUSB1 -b 230400 -vw main_full.bin
+	sudo stm32sprog -d /dev/ttyUSB0 -b 230400 -vw main_full.bin
 
 flash: main.bin
-	sudo stm32sprog -d /dev/ttyUSB1 -b 230400 -vw main.bin
+	sudo stm32sprog -d /dev/ttyUSB0 -b 230400 -vw main.bin
 
 f: main.bin
 	../rn1-tools/mcprog ~/dev/robo ./main.bin
@@ -61,4 +61,4 @@ syms:
 asm: $(ASMS)
 
 e: 
-	nano main.c stm32init.c stm32.ld motcon_comm.txt
+	gedit --new-window main.c stm32init.c stm32.ld &
