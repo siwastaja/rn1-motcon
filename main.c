@@ -31,9 +31,18 @@
 #define EN_DCCAL()  {GPIOA->BSRR = 1UL<<12;}
 #define DIS_DCCAL() {GPIOA->BSRR = 1UL<<(12+16);}
 
-#define HALL_C() (GPIOB->IDR & (1UL<<8))
-#define HALL_B() (GPIOB->IDR & (1UL<<7))
-#define HALL_A() (GPIOB->IDR & (1UL<<6))
+
+#ifdef PCB1A
+	#define HALL_C() (GPIOB->IDR & (1UL<<8))
+	#define HALL_B() (GPIOB->IDR & (1UL<<7))
+	#define HALL_A() (GPIOB->IDR & (1UL<<6))
+#endif
+
+#ifdef PCB1B
+	#define HALL_C() (GPIOB->IDR & (1UL<<6))
+	#define HALL_B() (GPIOB->IDR & (1UL<<7))
+	#define HALL_A() (GPIOB->IDR & (1UL<<8))
+#endif
 
 #define HALL_ABC() ((GPIOB->IDR & (0b111<<6))>>6)
 
@@ -113,6 +122,7 @@ volatile int led_short = 0;
 	to determine the 6-step position of the rotor.
 */
 const int hall_loc[8] =
+#ifdef PCB1A
 {
  -1, // 000  ERROR
  1, // 001
@@ -123,6 +133,19 @@ const int hall_loc[8] =
  4, // 110
  -1  // 111  ERROR
 };
+#endif
+#ifdef PCB1B
+{
+ -1, // 000  ERROR
+ 5, // 001
+ 3, // 010
+ 4, // 011
+ 1, // 100
+ 0, // 101  Middle hall active - we'll call this zero position
+ 2, // 110
+ -1  // 111  ERROR
+};
+#endif
 
 #define PH120SHIFT (1431655765UL)  // 120 deg shift between the phases in the 32-bit range.
 #define PH90SHIFT (1073741824UL)   // 90 deg shift between the phases in the 32-bit range.
@@ -149,8 +172,6 @@ const int base_hall_aims[6] =
 	PH120SHIFT/2
 };*/
 
-
-#define HALL_LOC() (hall_loc[HALL_ABC()])
 
 /*
 The sine table is indexed with 8 MSBs of uint32; this way, a huge resolution is implemented for the frequency,
@@ -255,13 +276,23 @@ void set_prot_lim(int ma)
 
 // 1024 equals 3V3; after gain=40, it's 82.5mV; with 1mOhm, it's 82.5A.
 // i.e., 81mA per unit.
+// 1024 equals 3V3; after gain=40, it's 82.5mV; with 1.5mOhm, it's 55.0A.
+// i.e., 55mA per unit.
+
+#ifdef PCB1A
+#define CUR_LIM_DIV 81
+#endif
+#ifdef PCB1B
+#define CUR_LIM_DIV 55
+#endif
+
 void set_curr_lim(int ma)
 {
 	// Protection limit set at 1.25x soft limit + 2A constant extra.
 	set_prot_lim(((ma*5)>>2)+2000);
 
-	neg_curr_lim = ma/-81;
-	pos_curr_lim = ma/81;
+	neg_curr_lim = ma/-CUR_LIM_DIV;
+	pos_curr_lim = ma/CUR_LIM_DIV;
 }
 
 void forward(uint16_t speed)
@@ -584,7 +615,6 @@ void tim1_inthandler()
 
 int main()
 {
-	int i;
 	RCC->CFGR = 0b1010UL << 18; // PLL x12 (because of /2 prediv)  --> 48 MHz
 	RCC->CR |= 1UL << 24; // PLL on
 	RCC->CFGR |= 0b10; // Change PLL to system clock
@@ -720,7 +750,7 @@ int main()
 
 	// todo: pullup in NSS (PA15)
 
-	set_curr_lim(15000);
+	set_curr_lim(12000);
 
 	int cnt = 0;
 	while(1)
@@ -768,11 +798,6 @@ int main()
 
 			default: break;
 		}
-
-//		static int kakka = 0;
-//		kakka++;
-//		if(kakka == 1000) { EN_GATE(); }
-
 
 //		timing_shift = spi_rx_data.s16[7]<<16;
 //		spi_tx_data.s16[7] = timing_shift>>16;
