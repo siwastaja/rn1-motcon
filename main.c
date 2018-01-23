@@ -380,8 +380,13 @@ void run_dccal()
 	good resolution of the fundamental frequency.
 */
 
-int floop_pi_term = 12;
-int floop_d_term = 128;
+
+static volatile uint8_t pid_i_max = 60;
+static volatile uint8_t pid_feedfwd = 30;
+static volatile uint8_t pid_p = 50;
+static volatile uint8_t pid_i = 50;
+static volatile uint8_t pid_d = 50;
+
 
 void tim1_inthandler()
 {
@@ -410,7 +415,7 @@ void tim1_inthandler()
 	DLED_ON();
 	TIM1->SR = 0; // Clear interrupt flags
 
-	spi_tx_data.magic = HALL_ABC();
+	//spi_tx_data.magic = HALL_ABC();
 
 	int hall_pos = hall_loc[HALL_ABC()];
 	if(hall_pos == -1) hall_pos = prev_hall_pos;
@@ -527,9 +532,6 @@ void tim1_inthandler()
 //	spi_tx_data.res5 = ferr>>8;
 
 
-#define PID_I_MAX 2000000000LL
-#define PID_I_MIN -PID_I_MAX
-
 	if(!(cnt & 15))
 	{
 
@@ -539,17 +541,19 @@ void tim1_inthandler()
 
 		pid_integral += ferr;
 
-		if(pid_integral > (PID_I_MAX)) pid_integral = PID_I_MAX;
-		else if(pid_integral < (PID_I_MIN)) pid_integral = PID_I_MIN;
+		int64_t pid_i_max_extended = (int64_t)pid_i_max<<25;
+		int64_t pid_i_min_extended = -1*pid_i_max_extended;
+		if(pid_integral > pid_i_max_extended) pid_integral = pid_i_max_extended;
+		else if(pid_integral < pid_i_min_extended) pid_integral = pid_i_min_extended;
 
-		mult = ((30*(int64_t)pid_f_set)>>10) /* feedforward */
-			+ ((50*(int64_t)ferr)>>12) /* P */
-			+ ((50*(int64_t)pid_integral)>>19)  /* I */
-			+ ((50*(int64_t)dferr)>>12);
+		mult = ((pid_feedfwd*(int64_t)pid_f_set)>>10) /* feedforward */
+			+ ((pid_p*(int64_t)ferr)>>12) /* P */
+			+ ((pid_i*(int64_t)pid_integral)>>19)  /* I */
+			+ ((pid_d*(int64_t)dferr)>>12); /* D */
 
 	}
 
-	spi_tx_data.res6 = mult;
+//	spi_tx_data.res6 = mult;
 	
 	int max_mult = 150*256;
 	int min_mult = -150*256;
@@ -583,8 +587,13 @@ void tim1_inthandler()
 	int current = latest_adc[1].cur_b-dccal_b; // Temporary solution, adc timing must be improved
 
 	spi_tx_data.current = current;
-	spi_tx_data.res4 = latest_adc[1].cur_b;
-	spi_tx_data.res5 = dccal_b;
+//	spi_tx_data.res4 = latest_adc[1].cur_b;
+//	spi_tx_data.res5 = dccal_b;
+
+	spi_tx_data.res4  = latest_adc[0].cur_b;
+	spi_tx_data.res5  = latest_adc[0].cur_c;
+	spi_tx_data.res6  = latest_adc[1].cur_b;
+	spi_tx_data.magic = latest_adc[1].cur_c;
 
 	if(OVERCURR())
 	{
@@ -799,11 +808,30 @@ int main()
 			default: break;
 		}
 
-//		timing_shift = spi_rx_data.s16[7]<<16;
-//		spi_tx_data.s16[7] = timing_shift>>16;
-
 //		floop_pi_term = spi_rx_data.res3&0xff;
 //		floop_d_term = (spi_rx_data.res3&0xff00)>>8;
+
+/*
+static volatile uint8_t pid_i_max = 60;
+static volatile uint8_t pid_feedfwd = 30;
+static volatile uint8_t pid_p = 50;
+static volatile uint8_t pid_i = 50;
+static volatile uint8_t pid_d = 50;
+*/
+
+		uint8_t imax    = (spi_rx_data.res3&0xff00)>>8;
+		uint8_t feedfwd = (spi_rx_data.res3&0xff);
+		uint8_t pterm   = (spi_rx_data.res4&0xff00)>>8;
+		uint8_t iterm   = (spi_rx_data.res4&0xff);
+		uint8_t dterm   = (spi_rx_data.res5&0xff00)>>8;
+
+
+		pid_i_max = imax;
+		pid_feedfwd = feedfwd;
+		pid_p = pterm;
+		pid_i = iterm;
+		pid_d = dterm;
+
 
 		if(timeout) timeout--;
 		else
