@@ -545,9 +545,9 @@ void tim1_inthandler()
 		else if(pid_integral < pid_i_min_extended) pid_integral = pid_i_min_extended;
 
 		mult = (((int64_t)pid_feedfwd*(int64_t)pid_f_set)>>10) /* feedforward */
-			+ (((int64_t)pid_p*(int64_t)ferr)>>12) /* P */
-			+ (((int64_t)pid_i*(int64_t)pid_integral)>>19)  /* I */
-			+ (((int64_t)pid_d*(int64_t)dferr)>>12); /* D */
+			+ (((int64_t)pid_p*(int64_t)ferr)>>10) /* P */
+			+ (((int64_t)pid_i*(int64_t)pid_integral)>>21)  /* I */
+			+ (((int64_t)pid_d*(int64_t)dferr)>>14); /* D */
 
 
 		spi_tx_data.res4  = pid_feedfwd;
