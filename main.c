@@ -762,7 +762,7 @@ int main()
 
 	// todo: pullup in NSS (PA15)
 
-	set_curr_lim(12000);
+	set_curr_lim(18000);
 
 	int cnt = 0;
 	while(1)
