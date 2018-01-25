@@ -25,13 +25,13 @@ main.bin: $(OBJ)
 	$(SIZE) main.elf
 
 flash_full: main.bin
-	stm32sprog -d /dev/ttyUSB1 -b 230400 -vw main_full.bin
+	stm32sprog -d /dev/ttyUSB0 -b 230400 -vw main_full.bin
 
 flash: main.bin
 	stm32sprog -d /dev/ttyUSB0 -b 230400 -vw main.bin
 
 f: main.bin
-	../rn1-tools/mcprog ~/dev/robo ./main.bin
+	scp main.bin hrst@$(robot):~/rn1-tools/motcon.bin
 
 f_local: main.bin
 	../rn1-tools/mcprog /dev/ttyUSB0 ./main.bin 4

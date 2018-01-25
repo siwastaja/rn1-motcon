@@ -534,8 +534,6 @@ void tim1_inthandler()
 
 	if(!(cnt & 15))
 	{
-
-	
 		int dferr = (ferr - prev_ferr);
 		prev_ferr = ferr;
 
@@ -546,11 +544,16 @@ void tim1_inthandler()
 		if(pid_integral > pid_i_max_extended) pid_integral = pid_i_max_extended;
 		else if(pid_integral < pid_i_min_extended) pid_integral = pid_i_min_extended;
 
-		mult = ((pid_feedfwd*(int64_t)pid_f_set)>>10) /* feedforward */
-			+ ((pid_p*(int64_t)ferr)>>12) /* P */
-			+ ((pid_i*(int64_t)pid_integral)>>19)  /* I */
-			+ ((pid_d*(int64_t)dferr)>>12); /* D */
+		mult = (((int64_t)pid_feedfwd*(int64_t)pid_f_set)>>10) /* feedforward */
+			+ (((int64_t)pid_p*(int64_t)ferr)>>12) /* P */
+			+ (((int64_t)pid_i*(int64_t)pid_integral)>>19)  /* I */
+			+ (((int64_t)pid_d*(int64_t)dferr)>>12); /* D */
 
+
+		spi_tx_data.res4  = pid_feedfwd;
+		spi_tx_data.res5  = pid_p;
+		spi_tx_data.res6  = pid_i;
+		spi_tx_data.magic = pid_d;
 	}
 
 //	spi_tx_data.res6 = mult;
@@ -590,10 +593,10 @@ void tim1_inthandler()
 //	spi_tx_data.res4 = latest_adc[1].cur_b;
 //	spi_tx_data.res5 = dccal_b;
 
-	spi_tx_data.res4  = latest_adc[0].cur_b;
-	spi_tx_data.res5  = latest_adc[0].cur_c;
-	spi_tx_data.res6  = latest_adc[1].cur_b;
-	spi_tx_data.magic = latest_adc[1].cur_c;
+//	spi_tx_data.res4  = latest_adc[0].cur_b;
+//	spi_tx_data.res5  = latest_adc[0].cur_c;
+//	spi_tx_data.res6  = latest_adc[1].cur_b;
+//	spi_tx_data.magic = latest_adc[1].cur_c;
 
 	if(OVERCURR())
 	{
