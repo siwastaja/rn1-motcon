@@ -381,11 +381,11 @@ void run_dccal()
 */
 
 
-static volatile uint8_t pid_i_max = 60;
+static volatile uint8_t pid_i_max = 30;
 static volatile uint8_t pid_feedfwd = 30;
-static volatile uint8_t pid_p = 50;
-static volatile uint8_t pid_i = 50;
-static volatile uint8_t pid_d = 50;
+static volatile uint8_t pid_p = 100;
+static volatile uint8_t pid_i = 20;
+static volatile uint8_t pid_d = 20;
 
 
 void tim1_inthandler()
@@ -545,15 +545,15 @@ void tim1_inthandler()
 		else if(pid_integral < pid_i_min_extended) pid_integral = pid_i_min_extended;
 
 		mult = (((int64_t)pid_feedfwd*(int64_t)pid_f_set)>>10) /* feedforward */
-			+ (((int64_t)pid_p*(int64_t)ferr)>>10) /* P */
+			+ (((int64_t)pid_p*(int64_t)ferr)>>9) /* P */
 			+ (((int64_t)pid_i*(int64_t)pid_integral)>>21)  /* I */
 			+ (((int64_t)pid_d*(int64_t)dferr)>>14); /* D */
 
 
-		spi_tx_data.res4  = pid_feedfwd;
-		spi_tx_data.res5  = pid_p;
-		spi_tx_data.res6  = pid_i;
-		spi_tx_data.magic = pid_d;
+		//spi_tx_data.res4  = pid_feedfwd;
+		//spi_tx_data.res5  = pid_p;
+		//spi_tx_data.res6  = pid_i;
+		//spi_tx_data.magic = pid_d;
 	}
 
 //	spi_tx_data.res6 = mult;
@@ -593,10 +593,10 @@ void tim1_inthandler()
 //	spi_tx_data.res4 = latest_adc[1].cur_b;
 //	spi_tx_data.res5 = dccal_b;
 
-//	spi_tx_data.res4  = latest_adc[0].cur_b;
-//	spi_tx_data.res5  = latest_adc[0].cur_c;
-//	spi_tx_data.res6  = latest_adc[1].cur_b;
-//	spi_tx_data.magic = latest_adc[1].cur_c;
+	spi_tx_data.res4  = latest_adc[0].cur_b;
+	spi_tx_data.res5  = latest_adc[0].cur_c;
+	spi_tx_data.res6  = latest_adc[1].cur_b;
+	spi_tx_data.magic = latest_adc[1].cur_c;
 
 	if(OVERCURR())
 	{
