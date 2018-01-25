@@ -288,11 +288,23 @@ void set_prot_lim(int ma)
 
 void set_curr_lim(int ma)
 {
+	static int prev_val = 9999999;
+
+	if(ma == prev_val)
+		return;
+
+	prev_val = ma;
+
+	if(ma < 0 || ma > 25000)
+		ma = 0;
+
+	int pos = ma/CUR_LIM_DIV;
+	__disable_irq();
+	pos_curr_lim = pos;
+	__enable_irq();
+
 	// Protection limit set at 1.25x soft limit + 2A constant extra.
 	set_prot_lim(((ma*5)>>2)+2000);
-
-	neg_curr_lim = ma/-CUR_LIM_DIV;
-	pos_curr_lim = ma/CUR_LIM_DIV;
 }
 
 void forward(uint16_t speed)
@@ -558,8 +570,8 @@ void tim1_inthandler()
 
 //	spi_tx_data.res6 = mult;
 	
-	int max_mult = 150*256;
-	int min_mult = -150*256;
+	int max_mult = 170*256;
+	int min_mult = -170*256;
 
 	if(mult > max_mult) mult = max_mult;
 	if(mult < min_mult) mult = min_mult;
@@ -587,9 +599,22 @@ void tim1_inthandler()
 
 	cnt++;
 
-	int current = latest_adc[1].cur_b-dccal_b; // Temporary solution, adc timing must be improved
+	int current_b = latest_adc[0].cur_b-dccal_b; // Temporary solution, adc timing must be improved
+	int current_c = latest_adc[0].cur_c-dccal_c; // Temporary solution, adc timing must be improved
 
-	spi_tx_data.current = current;
+	if(current_b < 0) current_b *= -1;
+	if(current_c < 0) current_c *= -1;
+
+	int current;
+	if(current_c > current_b) current = current_c; else current = current_b;
+
+	static int32_t current_flt = 0;
+
+	current_flt = ((current<<8) + 31*current_flt)>>5;
+
+	int32_t current_ma = (current_flt>>8)*CUR_LIM_DIV;
+	if(current_ma > 32767) current_ma = 32767; else if(current_ma < -32768) current_ma = -32768;
+	spi_tx_data.current = current_ma;
 //	spi_tx_data.res4 = latest_adc[1].cur_b;
 //	spi_tx_data.res5 = dccal_b;
 
@@ -601,9 +626,9 @@ void tim1_inthandler()
 	if(OVERCURR())
 	{
 		LED_ON(); led_short = 0;
-		currlim_mult-=50;
+		currlim_mult-=40;
 	}
-	else if(current < neg_curr_lim || current > pos_curr_lim)
+	else if(current > pos_curr_lim)
 	{
 		LED_ON(); led_short = 1;
 		currlim_mult-=2;
@@ -811,16 +836,7 @@ int main()
 			default: break;
 		}
 
-//		floop_pi_term = spi_rx_data.res3&0xff;
-//		floop_d_term = (spi_rx_data.res3&0xff00)>>8;
-
-/*
-static volatile uint8_t pid_i_max = 60;
-static volatile uint8_t pid_feedfwd = 30;
-static volatile uint8_t pid_p = 50;
-static volatile uint8_t pid_i = 50;
-static volatile uint8_t pid_d = 50;
-*/
+		set_curr_lim(spi_rx_data.cur_limit);
 
 		uint8_t imax    = (spi_rx_data.res3&0xff00)>>8;
 		uint8_t feedfwd = (spi_rx_data.res3&0xff);
