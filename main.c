@@ -52,8 +52,8 @@
 int bldc = 1;
 int timing_shift = 5000*65536;
 
-volatile int neg_curr_lim = -20;
-volatile int pos_curr_lim = 20;
+volatile int precise_curr_lim;
+volatile int higher_curr_lim;
 volatile int new_mult=0;
 volatile int timeout = 50;
 //volatile int do_resync = 10;
@@ -79,8 +79,8 @@ typedef union
 		int16_t speed;
 		int16_t current;
 		int16_t pos;
-		uint16_t res4;
-		uint16_t res5;
+		uint8_t cur_limit_mul;
+		uint8_t num_hard_limits;
 		uint16_t res6;
 		uint16_t magic;
 	};
@@ -298,9 +298,11 @@ void set_curr_lim(int ma)
 	if(ma < 0 || ma > 25000)
 		ma = 0;
 
-	int pos = ma/CUR_LIM_DIV;
+	int lim = (7*ma)/(8*CUR_LIM_DIV);
+	int hilim = (6*lim)/5;
 	__disable_irq();
-	pos_curr_lim = pos;
+	precise_curr_lim = lim;
+	higher_curr_lim = hilim;
 	__enable_irq();
 
 	// Protection limit set at 1.25x soft limit + 2A constant extra.
@@ -395,9 +397,9 @@ void run_dccal()
 
 static volatile uint8_t pid_i_max = 30;
 static volatile uint8_t pid_feedfwd = 30;
-static volatile uint8_t pid_p = 100;
-static volatile uint8_t pid_i = 20;
-static volatile uint8_t pid_d = 20;
+static volatile uint8_t pid_p = 80;
+static volatile uint8_t pid_i = 50;
+static volatile uint8_t pid_d = 50;
 
 
 void tim1_inthandler()
@@ -540,8 +542,6 @@ void tim1_inthandler()
 	ferr = pid_f_set - pid_f_meas;
 
 	spi_tx_data.speed = pid_f_meas>>8;
-//	spi_tx_data.res4 = pid_f_set>>8;
-//	spi_tx_data.res5 = ferr>>8;
 
 
 	if(!(cnt & 15))
@@ -561,36 +561,25 @@ void tim1_inthandler()
 			+ (((int64_t)pid_i*(int64_t)pid_integral)>>21)  /* I */
 			+ (((int64_t)pid_d*(int64_t)dferr)>>14); /* D */
 
-
-		//spi_tx_data.res4  = pid_feedfwd;
-		//spi_tx_data.res5  = pid_p;
-		//spi_tx_data.res6  = pid_i;
-		//spi_tx_data.magic = pid_d;
 	}
 
-//	spi_tx_data.res6 = mult;
 	
-	int max_mult = 170*256;
-	int min_mult = -170*256;
+	#define MAX_MULT (200*256)
+	#define MIN_MULT (-200*256)
 
-	if(mult > max_mult) mult = max_mult;
-	if(mult < min_mult) mult = min_mult;
-//	if(mult > -2*256 && mult < 2*256) resync = 5;
+	if(mult > MAX_MULT) mult = MAX_MULT;
+	else if(mult < MIN_MULT) mult = MIN_MULT;
 
 	int sin_mult = mult>>8;
-//	spi_tx_data.res4 = sin_mult;
-//	spi_tx_data.res5 = lost_count; 
-//	spi_tx_data.res6 = minfreq_count; 
 
 	if(reverse) sin_mult *= -1;	
 
 	if(sin_mult < 0) sin_mult = 0;
 
-#define MIN_MULT_OFFSET 10 // was 9
+#define MIN_MULT_OFFSET 8 // was 10
 	if(sin_mult != 0)
 		sin_mult += MIN_MULT_OFFSET;
 
-//	spi_tx_data.magic = lost_count; //sin_mult;
 
 	uint8_t m = (sin_mult * currlim_mult)>>8; // 254 max
 	TIM1->CCR1 = (PWM_MID) + ((m*sine[idxa])>>14); // 4 to 1019. 
@@ -599,8 +588,8 @@ void tim1_inthandler()
 
 	cnt++;
 
-	int current_b = latest_adc[0].cur_b-dccal_b; // Temporary solution, adc timing must be improved
-	int current_c = latest_adc[0].cur_c-dccal_c; // Temporary solution, adc timing must be improved
+	int current_b = latest_adc[0].cur_b-dccal_b;
+	int current_c = latest_adc[0].cur_c-dccal_c;
 
 	if(current_b < 0) current_b *= -1;
 	if(current_c < 0) current_c *= -1;
@@ -610,43 +599,40 @@ void tim1_inthandler()
 
 	static int32_t current_flt = 0;
 
-	current_flt = ((current<<8) + 31*current_flt)>>5;
+	current_flt = ((current<<8) + 63*current_flt)>>6;
 
 	int32_t current_ma = (current_flt>>8)*CUR_LIM_DIV;
 	if(current_ma > 32767) current_ma = 32767; else if(current_ma < -32768) current_ma = -32768;
 	spi_tx_data.current = current_ma;
-//	spi_tx_data.res4 = latest_adc[1].cur_b;
-//	spi_tx_data.res5 = dccal_b;
 
-	spi_tx_data.res4  = latest_adc[0].cur_b;
-	spi_tx_data.res5  = latest_adc[0].cur_c;
-	spi_tx_data.res6  = latest_adc[1].cur_b;
-	spi_tx_data.magic = latest_adc[1].cur_c;
 
 	if(OVERCURR())
 	{
+		spi_tx_data.num_hard_limits++;
 		LED_ON(); led_short = 0;
 		currlim_mult-=40;
 	}
-	else if(current > pos_curr_lim)
+	else if(current > higher_curr_lim)
 	{
 		LED_ON(); led_short = 1;
 		currlim_mult-=2;
+	}
+	else if(current_flt > precise_curr_lim)
+	{
+		// keep the currlim_mult
 	}
 	else if(currlim_mult < 255)
 		currlim_mult++;
 
 	if(currlim_mult < 5) currlim_mult = 5;
 
+	static int32_t currlim_mult_flt = 0;
+
+	currlim_mult_flt = ((currlim_mult<<8) + 63*currlim_mult_flt)>>6;
+
+	spi_tx_data.cur_limit_mul = currlim_mult_flt>>8;
 
 
-
-//	dbg = current;
-
-//	int vasen = latest_adc[0].cur_b-512;
-//	int oikea = latest_adc[1].cur_b-512;
-
-//	dbg = ((int8_t)(vasen>>2))<<8 | (int8_t)(oikea>>2);
 	DLED_OFF();
 }
 
