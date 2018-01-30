@@ -1,11 +1,27 @@
+/*
+	PULUROBOT RN1-MOTCON  Motor controller MCU firmware
+
+	(c) 2017-2018 Pulu Robotics and other contributors
+	Maintainer: Antti Alhonen <antti.alhonen@iki.fi>
+
+	This program is free software; you can redistribute it and/or modify
+	it under the terms of the GNU General Public License version 2, as 
+	published by the Free Software Foundation.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	GNU General Public License version 2 is supplied in file LICENSING.
+
+
+	Routines for remote firmware update through SPI.
+
+*/
+
 #include "ext_include/stm32f0xx.h"
 #include "flash.h"
-
-/*
-	This file locates a settings data structure into a specific flash page, used for nonvolatile setting storage.
-	This file also defines routines to erase, write and verify the flash memory for in-system SW upgrade through
-	the SPI link. These routines are stored in yet another flash page, not erasable with these routines.
-*/
 
 /*
 settings_type settings __attribute__((section(".settings"))) =
@@ -82,76 +98,6 @@ void erase_page(uint32_t addr)
 	// Writing PG bit fails without any warning or error flags if PER is not cleared.
 	FLASH->CR = 0; // Erase bit off.
 }
-
-/*
-
-void program_setting_page()
-{
-	unlock_flash();
-
-	erase_page(FLASH_OFFSET + (uint32_t)&_SETTINGSI_BEGIN);
-
-	FLASH->CR = 1UL<<0; // Program on.
-
-	uint16_t* settings_begin  = (uint16_t*)&_SETTINGS_BEGIN;
-	uint16_t* settings_end    = (uint16_t*)&_SETTINGS_END;
-	volatile uint16_t* settingsi_begin = (uint16_t*)&_SETTINGSI_BEGIN;
-
-	// When accessing flash, we don't use the remapped 0x0000 0000 address space, but the
-	// real address space at FLASH_OFFSET. These being pointers to uint16_t (not bytes), we increment
-	// the address by FLASH_OFFSET/2.
-	settingsi_begin += FLASH_OFFSET/2;
-	while(settings_begin < settings_end)
-	{
-		*settingsi_begin = *settings_begin;
-
-		settings_begin++;
-		settingsi_begin++;
-		while(FLASH->SR & 1) ; // Poll busy bit
-
-		// STM32 HW bug workaround: contrary to what the documentation clearly instructs you must do,
-		// EOP bit must NOT be polled. It's not polled in official libraries, either.
-
-	}
-
-	FLASH->SR |= 1UL<<5; // Clear End Of Operation bit by writing '1'
-	FLASH->CR = 0; // Program off.
-
-	lock_flash();
-}
-
-int verify_settings()
-{
-	uint32_t* settings_begin  = (uint32_t*)&_SETTINGS_BEGIN;
-	uint32_t* settings_end    = (uint32_t*)&_SETTINGS_END;
-	uint32_t* settingsi_begin = (uint32_t*)&_SETTINGSI_BEGIN;
-
-	while(settings_begin < settings_end)
-	{
-		if(*settings_begin != *settingsi_begin)
-		{
-			return -1;
-		}
-		settings_begin++;
-		settingsi_begin++;
-	}
-	return 0;
-}
-
-void save_settings()
-{
-	program_setting_page();
-	if(verify_settings())
-	{
-		program_setting_page();
-		if(verify_settings())
-		{
-			error(FLASH_WRITE_ERROR);
-		}
-	}
-
-}
-*/
 
 void spi_flash_program(int size) __attribute__((section(".flasher")));
 void spi_flash_program(int size)

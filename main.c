@@ -1,3 +1,27 @@
+/*
+	PULUROBOT RN1-MOTCON  Motor controller MCU firmware
+
+	(c) 2017-2018 Pulu Robotics and other contributors
+	Maintainer: Antti Alhonen <antti.alhonen@iki.fi>
+
+	This program is free software; you can redistribute it and/or modify
+	it under the terms of the GNU General Public License version 2, as 
+	published by the Free Software Foundation.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	GNU General Public License version 2 is supplied in file LICENSING.
+
+
+	This module provides simple BLDC motor control, with PID speed loop
+	and current limit. This controller communicates with the main
+	controller (rn1-brain) through SPI.
+*/
+
+
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -25,9 +49,13 @@
 #define DLED_OFF() {}
 #endif
 
+
+// Gates enabled, or just freewheeling.
 #define EN_GATE()  {GPIOA->BSRR = 1UL<<11;}
 #define DIS_GATE() {GPIOA->BSRR = 1UL<<(11+16);}
 
+
+// Current sense amplifier DC offset measurement magic: this prevents normal operation.
 #define EN_DCCAL()  {GPIOA->BSRR = 1UL<<12;}
 #define DIS_DCCAL() {GPIOA->BSRR = 1UL<<(12+16);}
 
@@ -46,27 +74,25 @@
 
 #define HALL_ABC() ((GPIOB->IDR & (0b111<<6))>>6)
 
+
+// FET Rds(on) based crude overcurrent info from the fet driver:
 #define OVERCURR() (!(GPIOA->IDR & (1UL<<14)))
 
 
-int bldc = 1;
-int timing_shift = 5000*65536;
+int timing_shift = 5000*65536; // hall sensors are not exactly where you could think they are.
 
-volatile int precise_curr_lim;
-volatile int higher_curr_lim;
-volatile int new_mult=0;
-volatile int timeout = 50;
-//volatile int do_resync = 10;
+volatile int precise_curr_lim; // if exceeded, the duty cycle multiplier is kept (not increased like normally)
+volatile int higher_curr_lim;  // if exceeded, the duty cycle multiplier is lowered
 
 typedef struct __attribute__ ((packed))
 {
-	int16_t cur_c;
-	int16_t cur_b;
+	int16_t cur_c; // phase C current
+	int16_t cur_b; // phase B current
 } adc_data_t;
 
 #define NUM_ADC_SAMPLES 2
 
-volatile adc_data_t latest_adc[2];
+volatile adc_data_t latest_adc[NUM_ADC_SAMPLES];
 int16_t dccal_c;
 int16_t dccal_b;
 
@@ -84,8 +110,8 @@ typedef union
 		uint16_t res6;
 		uint16_t magic;
 	};
-	uint16_t u16[8];
-	int16_t s16[8];
+	uint16_t u16[SPI_DATAGRAM_LEN];
+	int16_t s16[SPI_DATAGRAM_LEN];
 } spi_tx_t;
 
 typedef union
@@ -101,21 +127,16 @@ typedef union
 		uint16_t res6;
 		uint16_t magic;
 	};
-	uint16_t u16[8];
-	int16_t s16[8];
+	uint16_t u16[SPI_DATAGRAM_LEN];
+	int16_t s16[SPI_DATAGRAM_LEN];
 } spi_rx_t;
 
 volatile spi_tx_t spi_tx_data;
 volatile spi_rx_t spi_rx_data;
 
-volatile uint16_t lost_count, minfreq_count;
+//volatile uint16_t lost_count;
 
-
-volatile int d_shift = 13;
-volatile int pi_shift = 32;
-int hall_aim_f_comp = 0;
-
-volatile int led_short = 0;
+volatile int led_short = 0; // whether the LED blinks shortly, or longer
 
 /*
 	three adjacent hall io pins (active low) form a 3-bit number which can be used to index hall_loc table,
@@ -161,21 +182,13 @@ const int base_hall_aims[6] =
 	PH120SHIFT*2+PH120SHIFT/2
 };
 
-
-/*const int base_hall_aims[6] =
-{
-	PH120SHIFT,
-	PH120SHIFT+PH120SHIFT/2,
-	PH120SHIFT*2,
-	PH120SHIFT*2+PH120SHIFT/2,
-	0,
-	PH120SHIFT/2
-};*/
-
-
 /*
 The sine table is indexed with 8 MSBs of uint32; this way, a huge resolution is implemented for the frequency,
 since the frequency is a term added to the indexing each round.
+
+Sine table is 256 long. It is pointed to by the MSByte of uint32_t which rolls over, for
+good resolution of the fundamental frequency.
+
 */
 
 const int sine[256] =
@@ -240,16 +253,16 @@ void error(int code)
 
 void adc_int_handler()
 {
-	ADC1->ISR |= 1UL<<7;
+	ADC1->ISR |= 1UL<<7; // just clear the interrupt flag
 }
 
 /*
 	Protection current limit: the FET driver measures the MOSFET Vds while the FETs are turned on
 	and compares it to an analog input pin; in case of overcurrent, the driver instantly blanks the
 	FETs out (and gives overcurrent signal to the MCU). This is only meant for protection; not normal
-	operation.
+	operation, since it's inaccurate (and temperature dependent).
 */
-#define MAX_PROT_LIM 40000 // mA
+#define MAX_PROT_LIM 36000 // mA
 #define MIN_PROT_LIM 1000 // mA
 void set_prot_lim(int ma)
 {
@@ -309,42 +322,6 @@ void set_curr_lim(int ma)
 	set_prot_lim(((ma*5)>>2)+2000);
 }
 
-void forward(uint16_t speed)
-{
-	EN_GATE();
-	timeout = 200;
-	if(speed > 400)
-		speed = 400;
-
-	if(bldc)
-	{
-		new_mult = speed>>1;
-	}
-	else
-	{
-		TIM1->CCR1 = 0;
-		TIM1->CCR2 = speed;
-	}
-}
-
-void backward(uint16_t speed)
-{
-	EN_GATE();
-	timeout = 200;
-	if(speed > 400)
-		speed = 400;
-
-	if(bldc)
-	{
-		new_mult = -1*(int)(speed>>1);
-	}
-	else
-	{
-		TIM1->CCR1 = speed;
-		TIM1->CCR2 = 0;
-	}
-}
-
 extern void flasher() __attribute__((section(".flasher")));
 
 void run_flasher()
@@ -389,10 +366,6 @@ void run_dccal()
 	delay_ms(10);
 }
 
-/*
-	Sine table is 256 long. It is pointed to by the MSByte of uint32_t which rolls over, for
-	good resolution of the fundamental frequency.
-*/
 
 
 static volatile uint8_t pid_i_max = 30;
@@ -424,12 +397,8 @@ void tim1_inthandler()
 	static int pid_f_set;
 	static int64_t pid_integral = 0;
 
-//	static int accel_dir = 0;
-
 	DLED_ON();
 	TIM1->SR = 0; // Clear interrupt flags
-
-	//spi_tx_data.magic = HALL_ABC();
 
 	int hall_pos = hall_loc[HALL_ABC()];
 	if(hall_pos == -1) hall_pos = prev_hall_pos;
@@ -443,6 +412,10 @@ void tim1_inthandler()
 	}
 	prev_reverse = reverse;
 
+/*
+	Note: this code did sine interpolation earlier on. Now the relevant parts are commented out so it does
+	a simple 6-step: it's working more robustly at low speeds.
+*/
 
 	if(resync)
 	{
@@ -493,7 +466,7 @@ void tim1_inthandler()
 	}
 	else // We are lost - synchronize the phase to the current hall status
 	{
-		lost_count++;
+		//lost_count++;
 		loc = (base_hall_aims[hall_pos] + timing_shift + (reverse?(-PH90SHIFT):(PH90SHIFT)));
 		cnt_at_prev_hall_valid = 0;
 		expected_next_hall_cnt = cnt+22000;
@@ -543,7 +516,7 @@ void tim1_inthandler()
 
 	spi_tx_data.speed = pid_f_meas>>8;
 
-
+	// Run the speed PID loop - not on every ISR cycle
 	if(!(cnt & 15))
 	{
 		int dferr = (ferr - prev_ferr);
@@ -576,7 +549,7 @@ void tim1_inthandler()
 
 	if(sin_mult < 0) sin_mult = 0;
 
-#define MIN_MULT_OFFSET 8 // was 10
+#define MIN_MULT_OFFSET 8 // no point in outputting extremely low amplitudes
 	if(sin_mult != 0)
 		sin_mult += MIN_MULT_OFFSET;
 
@@ -606,7 +579,7 @@ void tim1_inthandler()
 	spi_tx_data.current = current_ma;
 
 
-	if(OVERCURR())
+	if(OVERCURR()) // hard overcurrent, protection has acted, quickly ramp down the multiplier to avoid hitting it again
 	{
 		spi_tx_data.num_hard_limits++;
 		LED_ON(); led_short = 0;
@@ -699,8 +672,8 @@ int main()
 
 	TIM1->ARR = 1024; // 23.4 kHz
 
-	if(bldc)
-		TIM1->CCER |= 1UL<<8 /*OC3 on*/ | 1UL<<10 /*OC3 complementary output enable*/;
+	TIM1->CCER |= 1UL<<8 /*OC3 on*/ | 1UL<<10 /*OC3 complementary output enable*/; // third phase for BLDC
+
 
 	TIM1->CCR1 = 512;
 	TIM1->CCR2 = 512;
@@ -837,14 +810,6 @@ int main()
 		pid_i = iterm;
 		pid_d = dterm;
 
-
-		if(timeout) timeout--;
-		else
-		{
-			new_mult = 0;
-//			DIS_GATE();
-
-		}
 	}
 
 
